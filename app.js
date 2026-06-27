@@ -16,9 +16,7 @@ import { ReportService } from './reports/ReportService.js';
 import { HealthMonitor } from './monitor/HealthMonitor.js';
 
 class App {
-  #container;
-  #logger;
-  #isRunning = false;
+  #container; #logger; #isRunning = false;
 
   async start() {
     try {
@@ -48,7 +46,7 @@ class App {
     this.#container.register('logger', logger);
     this.#container.register('database', database);
 
-    // FIX: Retry exchange connection up to 3 times
+    // Exchange with retry
     let exchange = null;
     const exchangeFactory = new ExchangeFactory(config, logger);
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -56,9 +54,9 @@ class App {
         exchange = await exchangeFactory.create();
         break;
       } catch (error) {
-        logger.warn(`Exchange connection attempt ${attempt}/3 failed: ${error.message}`);
+        logger.warn(`Exchange attempt ${attempt}/3 failed: ${error.message}`);
         if (attempt === 3) throw error;
-        await this.#sleep(5000 * attempt);
+        await new Promise(r => setTimeout(r, 5000 * attempt));
       }
     }
     this.#container.register('exchange', exchange);
@@ -84,7 +82,8 @@ class App {
     const reportService = new ReportService(config, logger, database, telegram);
     this.#container.register('reportService', reportService);
 
-    const healthMonitor = new HealthMonitor(config, logger, telegram, database);
+    // FIX: HealthMonitor now takes exchange for connection checking
+    const healthMonitor = new HealthMonitor(config, logger, telegram, database, exchange);
     this.#container.register('healthMonitor', healthMonitor);
   }
 
@@ -111,14 +110,10 @@ class App {
       this.#isRunning = false;
       this.#logger.info(`Received ${signal}. Shutting down...`);
       try {
-        const tradeManager = this.#container.resolve('tradeManager');
-        await tradeManager.shutdown();
-        const reportService = this.#container.resolve('reportService');
-        reportService.stop();
-        const healthMonitor = this.#container.resolve('healthMonitor');
-        healthMonitor.stop();
-        const database = this.#container.resolve('database');
-        await database.close();
+        this.#container.resolve('tradeManager').shutdown();
+        this.#container.resolve('reportService').stop();
+        this.#container.resolve('healthMonitor').stop();
+        await this.#container.resolve('database').close();
         this.#logger.info('Shutdown complete');
         process.exit(0);
       } catch (error) {
@@ -131,8 +126,6 @@ class App {
     process.on('uncaughtException', (error) => { this.#logger?.error('Uncaught:', error); });
     process.on('unhandledRejection', (reason) => { this.#logger?.error('Unhandled:', reason); });
   }
-
-  #sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 }
 
 const app = new App();

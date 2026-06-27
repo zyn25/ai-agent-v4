@@ -1,21 +1,89 @@
 const MIGRATIONS = [{
-  version: 1, name: 'create_tables',
+  version: 2, name: 'create_tables_v2',
   sql: `
-    CREATE TABLE IF NOT EXISTS positions (id TEXT PRIMARY KEY, pair TEXT NOT NULL, side TEXT NOT NULL, entry_price REAL, exit_price REAL, quantity REAL, leverage INTEGER DEFAULT 1, stop_loss REAL, take_profit REAL, trailing_stop REAL, break_even_price REAL, pnl REAL DEFAULT 0, roi REAL DEFAULT 0, fees REAL DEFAULT 0, slippage REAL DEFAULT 0, status TEXT DEFAULT 'open', exit_reason TEXT, ai_confidence REAL, ai_decision TEXT, strategy_version TEXT DEFAULT 'v4', open_time TEXT, close_time TEXT, hold_duration INTEGER DEFAULT 0, break_even_applied INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, position_id TEXT NOT NULL, action TEXT NOT NULL, price REAL, quantity REAL, pnl REAL, details TEXT, created_at TEXT DEFAULT (datetime('now')), FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE CASCADE);
-    CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, balance REAL NOT NULL, equity REAL NOT NULL, unrealized_pnl REAL DEFAULT 0, realized_pnl REAL DEFAULT 0, total_trades INTEGER DEFAULT 0, winning_trades INTEGER DEFAULT 0, losing_trades INTEGER DEFAULT 0, win_rate REAL DEFAULT 0, profit_factor REAL DEFAULT 0, max_drawdown REAL DEFAULT 0, daily_pnl REAL DEFAULT 0, weekly_pnl REAL DEFAULT 0, monthly_pnl REAL DEFAULT 0, updated_at TEXT DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE NOT NULL, value TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL, side TEXT NOT NULL, confidence REAL, indicators TEXT, timeframe TEXT, ai_decision TEXT, ai_confidence REAL, ai_reason TEXT, status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, period_start TEXT, period_end TEXT, data TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS trade_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, position_id TEXT, level TEXT DEFAULT 'info', message TEXT NOT NULL, details TEXT, created_at TEXT DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS system_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, level TEXT NOT NULL, category TEXT, message TEXT NOT NULL, details TEXT, created_at TEXT DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS ai_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER, request TEXT, response TEXT, tokens_used INTEGER, latency_ms INTEGER, created_at TEXT DEFAULT (datetime('now')));
-    CREATE TABLE IF NOT EXISTS performance (id INTEGER PRIMARY KEY AUTOINCREMENT, cpu_usage REAL, ram_usage REAL, disk_usage REAL, exchange_connected INTEGER DEFAULT 1, telegram_connected INTEGER DEFAULT 1, ai_connected INTEGER DEFAULT 1, db_healthy INTEGER DEFAULT 1, open_positions INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS positions (
+      id TEXT PRIMARY KEY, pair TEXT NOT NULL, side TEXT NOT NULL,
+      entry_price REAL, exit_price REAL, quantity REAL, leverage INTEGER DEFAULT 1,
+      stop_loss REAL, take_profit REAL, trailing_stop REAL, break_even_price REAL,
+      pnl REAL DEFAULT 0, roi REAL DEFAULT 0, fees REAL DEFAULT 0, slippage REAL DEFAULT 0,
+      status TEXT DEFAULT 'open', exit_reason TEXT, ai_confidence REAL, ai_decision TEXT,
+      strategy_version TEXT DEFAULT 'v4', open_time TEXT, close_time TEXT,
+      hold_duration INTEGER DEFAULT 0, break_even_applied INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, position_id TEXT NOT NULL,
+      action TEXT NOT NULL, price REAL, quantity REAL, pnl REAL, details TEXT,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (position_id) REFERENCES positions(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS portfolio (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, balance REAL NOT NULL, equity REAL NOT NULL,
+      unrealized_pnl REAL DEFAULT 0, realized_pnl REAL DEFAULT 0,
+      total_trades INTEGER DEFAULT 0, winning_trades INTEGER DEFAULT 0,
+      losing_trades INTEGER DEFAULT 0, win_rate REAL DEFAULT 0,
+      profit_factor REAL DEFAULT 0, max_drawdown REAL DEFAULT 0,
+      daily_pnl REAL DEFAULT 0, weekly_pnl REAL DEFAULT 0, monthly_pnl REAL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE NOT NULL, value TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS signals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL, side TEXT NOT NULL,
+      confidence REAL, indicators TEXT, timeframe TEXT,
+      ai_decision TEXT, ai_confidence REAL, ai_reason TEXT,
+      status TEXT DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL,
+      period_start TEXT, period_end TEXT, data TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS trade_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, position_id TEXT,
+      level TEXT DEFAULT 'info', message TEXT NOT NULL, details TEXT,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS system_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, level TEXT NOT NULL,
+      category TEXT, message TEXT NOT NULL, details TEXT,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER,
+      request TEXT, response TEXT, tokens_used INTEGER, latency_ms INTEGER,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS performance (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cpu_usage REAL, ram_usage REAL, disk_usage REAL,
+      exchange_connected INTEGER DEFAULT 1, telegram_connected INTEGER DEFAULT 1,
+      ai_connected INTEGER DEFAULT 1, db_healthy INTEGER DEFAULT 1,
+      open_positions INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
     CREATE INDEX IF NOT EXISTS idx_positions_pair ON positions(pair);
+    CREATE INDEX IF NOT EXISTS idx_positions_close_time ON positions(close_time);
+    CREATE INDEX IF NOT EXISTS idx_positions_open_time ON positions(open_time);
     CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
+    CREATE INDEX IF NOT EXISTS idx_trade_logs_position ON trade_logs(position_id);
     CREATE INDEX IF NOT EXISTS idx_trade_logs_created ON trade_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_system_logs_created ON system_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_system_logs_message ON system_logs(message);
     CREATE INDEX IF NOT EXISTS idx_ai_logs_created ON ai_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_performance_created ON performance(created_at);
   `
