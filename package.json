@@ -1,0 +1,22 @@
+{
+  "name": "ai-agent-v4",
+  "version": "4.0.0",
+  "description": "Enterprise AI Paper Trading Platform",
+  "main": "app.js",
+  "type": "module",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "node --watch app.js",
+    "test": "node --test tests/**/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "ccxt": "^4.4.0",
+    "better-sqlite3": "^11.0.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "dotenv": "^16.4.0",
+    "technicalindicators": "^3.1.0"
+  }
+}

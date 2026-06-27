@@ -1,0 +1,28 @@
+const MIGRATIONS = [{
+  version: 1, name: 'create_tables',
+  sql: `
+    CREATE TABLE IF NOT EXISTS positions (id TEXT PRIMARY KEY, pair TEXT NOT NULL, side TEXT NOT NULL, entry_price REAL, exit_price REAL, quantity REAL, leverage INTEGER DEFAULT 1, stop_loss REAL, take_profit REAL, trailing_stop REAL, break_even_price REAL, pnl REAL DEFAULT 0, roi REAL DEFAULT 0, fees REAL DEFAULT 0, slippage REAL DEFAULT 0, status TEXT DEFAULT 'open', exit_reason TEXT, ai_confidence REAL, ai_decision TEXT, strategy_version TEXT DEFAULT 'v4', open_time TEXT, close_time TEXT, hold_duration INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, position_id TEXT NOT NULL, action TEXT NOT NULL, price REAL, quantity REAL, pnl REAL, details TEXT, created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS portfolio (id INTEGER PRIMARY KEY AUTOINCREMENT, balance REAL NOT NULL, equity REAL NOT NULL, unrealized_pnl REAL DEFAULT 0, realized_pnl REAL DEFAULT 0, total_trades INTEGER DEFAULT 0, winning_trades INTEGER DEFAULT 0, losing_trades INTEGER DEFAULT 0, win_rate REAL DEFAULT 0, profit_factor REAL DEFAULT 0, max_drawdown REAL DEFAULT 0, daily_pnl REAL DEFAULT 0, weekly_pnl REAL DEFAULT 0, monthly_pnl REAL DEFAULT 0, updated_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT UNIQUE NOT NULL, value TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, pair TEXT NOT NULL, side TEXT NOT NULL, confidence REAL, indicators TEXT, timeframe TEXT, ai_decision TEXT, ai_confidence REAL, ai_reason TEXT, status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, period_start TEXT, period_end TEXT, data TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS trade_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, position_id TEXT, level TEXT DEFAULT 'info', message TEXT NOT NULL, details TEXT, created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS system_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, level TEXT NOT NULL, category TEXT, message TEXT NOT NULL, details TEXT, created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS ai_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, signal_id INTEGER, request TEXT, response TEXT, tokens_used INTEGER, latency_ms INTEGER, created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS performance (id INTEGER PRIMARY KEY AUTOINCREMENT, cpu_usage REAL, ram_usage REAL, disk_usage REAL, exchange_connected INTEGER DEFAULT 1, telegram_connected INTEGER DEFAULT 1, ai_connected INTEGER DEFAULT 1, db_healthy INTEGER DEFAULT 1, open_positions INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
+    CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
+    CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
+    CREATE INDEX IF NOT EXISTS idx_performance_created ON performance(created_at);
+  `
+}];
+
+export function runMigrations(db, logger) {
+  db.exec(`CREATE TABLE IF NOT EXISTS migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')));`);
+  const applied = db.prepare('SELECT version FROM migrations').all().map(r => r.version);
+  for (const m of MIGRATIONS) {
+    if (applied.includes(m.version)) continue;
+    db.transaction(() => { db.exec(m.sql); db.prepare('INSERT INTO migrations (version, name) VALUES (?, ?)').run(m.version, m.name); })();
+    logger.info(`Migration: ${m.name} (v${m.version})`);
+  }
+}
