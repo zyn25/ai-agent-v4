@@ -20,7 +20,12 @@ export class TelegramService {
       this.#bot.onText(/\/status/,()=>{const p=this.#portRepo.getCurrent();const pos=this.#posRepo.findOpen();this.#send(this.#fmt.formatDashboard(p,pos));});
       this.#bot.onText(/\/positions/,()=>{this.#send(this.#fmt.formatOpenPositions(this.#posRepo.findOpen()));});
       this.#bot.onText(/\/stats/,()=>{const s=this.#posRepo.getStats();if(!s||!s.total){this.#send('No trades yet.');return;}const wr=s.total>0?((s.wins/s.total)*100).toFixed(1):'0';this.#send('📈 <b>STATS</b>\n\nTrades: '+s.total+'\nWins: '+s.wins+'\nWin Rate: '+wr+'%\nPnL: $'+s.total_pnl.toFixed(2));});
-      this.#bot.on('polling_error',e=>this.#logger.error('TG poll:',e.message));
+      this.#bot.on('polling_error',e=>{
+        if(e.code==='EFATAL') {
+          this.#logger.warn('Telegram polling fatal, restarting in 5s...');
+          setTimeout(()=>{try{this.#bot.stopPolling();this.#bot.startPolling();}catch{}},5000);
+        }
+      });
       this.#logger.info('Telegram initialized');
     } catch(e){this.#logger.error('TG init fail:',e.message);}
   }
