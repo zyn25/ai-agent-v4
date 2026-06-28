@@ -1,5 +1,5 @@
 export class Config {
-  #exchange; #trading; #indicators; #risk; #timeframes; #ai; #telegram; #logging;
+  #exchange; #trading; #indicators; #risk; #timeframes; #ai; #telegram; #logging; #pairs;
   constructor() {
     this.#exchange = { name: process.env.EXCHANGE_NAME || 'binance', apiKey: process.env.EXCHANGE_API_KEY || '', secret: process.env.EXCHANGE_SECRET || '', password: process.env.EXCHANGE_PASSWORD || '', testnet: process.env.EXCHANGE_TESTNET === 'true', pair: process.env.TRADING_PAIR || 'BTC/USDT:USDT', leverage: parseInt(process.env.LEVERAGE, 10) || 10 };
     this.#trading = { mode: process.env.TRADING_MODE || 'paper', startingBalance: parseFloat(process.env.STARTING_BALANCE) || 10000 };
@@ -9,6 +9,7 @@ export class Config {
     this.#ai = { enabled: process.env.AI_ENABLED !== 'false', apiKey: process.env.OPENROUTER_API_KEY || '', model: process.env.OPENROUTER_MODEL || 'openai/gpt-4o', confidenceThreshold: parseInt(process.env.AI_CONFIDENCE_THRESHOLD, 10) || 70, maxTokens: parseInt(process.env.AI_MAX_TOKENS, 10) || 500, temperature: parseFloat(process.env.AI_TEMPERATURE) || 0.1 };
     this.#telegram = { enabled: process.env.TELEGRAM_ENABLED !== 'false', botToken: process.env.TELEGRAM_BOT_TOKEN || '', chatId: process.env.TELEGRAM_CHAT_ID || '' };
     this.#logging = { level: process.env.LOG_LEVEL || 'info', maxSizeMB: parseInt(process.env.LOG_MAX_SIZE_MB, 10) || 50, maxFiles: parseInt(process.env.LOG_MAX_FILES, 10) || 10 };
+    this.#pairs = (process.env.TRADING_PAIRS || process.env.TRADING_PAIR || 'BTC/USDT:USDT').split(',').map(s => s.trim());
   }
   get exchange() { return this.#exchange; }
   get trading() { return this.#trading; }
@@ -18,4 +19,5 @@ export class Config {
   get ai() { return this.#ai; }
   get telegram() { return this.#telegram; }
   get logging() { return this.#logging; }
+  get pairs() { return this.#pairs; }
 }

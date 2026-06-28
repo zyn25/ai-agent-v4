@@ -10,28 +10,38 @@ export class SignalEngine {
   #config; #logger; #marketData;
   constructor(config, logger, marketData) { this.#config=config; this.#logger=logger; this.#marketData=marketData; }
 
-  async analyze() {
+  async analyze(pair) {
+    const targetPair = pair || this.#config.exchange.pair;
     try {
       const {primary,secondary,tertiary}=this.#config.timeframes;
-      const [pd,sd,td]=await Promise.all([this.#fetch(primary),this.#fetch(secondary),this.#fetch(tertiary)]);
-      if(!pd||!sd||!td) return {side:'neutral',confidence:0,reason:'Data fetch failed'};
+      const [pd,sd,td]=await Promise.all([this.#fetch(targetPair,primary),this.#fetch(targetPair,secondary),this.#fetch(targetPair,tertiary)]);
+      if(!pd||!sd||!td) return {pair:targetPair,side:'neutral',confidence:0,reason:'Data fetch failed'};
       const ps=this.#calc(pd,50),ss=this.#calc(sd,30),ts=this.#calc(td,20);
-      if(!ps||!ss||!ts) return {side:'neutral',confidence:0,reason:'Indicator calc failed'};
+      if(!ps||!ss||!ts) return {pair:targetPair,side:'neutral',confidence:0,reason:'Calc failed'};
       const mtf=ps.score+ss.score+ts.score;
-      if(!TrendFilter.checkAlignment(ps.trend,ss.trend,ts.trend)) return {side:'neutral',confidence:0,reason:'Timeframes not aligned'};
+      if(!TrendFilter.checkAlignment(ps.trend,ss.trend,ts.trend)) return {pair:targetPair,side:'neutral',confidence:0,reason:'Not aligned'};
       const side=mtf>0?SIDE.LONG:SIDE.SHORT;
       const confidence=Math.min(Math.abs(mtf),100);
-      if(confidence<this.#config.indicators.confidenceThreshold) return {side:'neutral',confidence,reason:'Below threshold'};
-      return {side,confidence,reason:'Signal generated',indicators:{primary:ps,secondary:ss,tertiary:ts}};
-    } catch(e) { this.#logger.error('Signal error:',e.message); return {side:'neutral',confidence:0,reason:e.message}; }
+      if(confidence<this.#config.indicators.confidenceThreshold) return {pair:targetPair,side:'neutral',confidence,reason:'Below threshold'};
+      return {pair:targetPair,side,confidence,reason:'Signal generated',indicators:{primary:ps,secondary:ss,tertiary:ts}};
+    } catch(e) { this.#logger.error('Signal '+targetPair+': '+e.message); return {pair:targetPair,side:'neutral',confidence:0,reason:e.message}; }
   }
 
-  async #fetch(tf) {
+  async analyzeAll() {
+    const signals = [];
+    for (const pair of this.#config.pairs) {
+      const signal = await this.analyze(pair);
+      if (signal.side !== 'neutral') signals.push(signal);
+    }
+    return signals;
+  }
+
+  async #fetch(pair,tf) {
     try {
-      const ohlcv=await this.#marketData.fetchOHLCV(tf,200);
+      const ohlcv=await this.#marketData.fetchOHLCV(pair,tf,200);
       if(!ohlcv||ohlcv.length<50) return null;
       return {opens:ohlcv.map(c=>c[1]),highs:ohlcv.map(c=>c[2]),lows:ohlcv.map(c=>c[3]),closes:ohlcv.map(c=>c[4]),volumes:ohlcv.map(c=>c[5])};
-    } catch(e) { this.#logger.warn('Fetch '+tf+' failed:',e.message); return null; }
+    } catch(e) { this.#logger.warn('Fetch '+pair+' '+tf+': '+e.message); return null; }
   }
 
   #calc(d,w) {
@@ -54,6 +64,6 @@ export class SignalEngine {
       if(mi.includes('bullish'))score+=w*0.25;else if(mi.includes('bearish'))score-=w*0.25;
       if(vi==='high'||vi==='very_high')score*=1.1;else if(vi==='low')score*=0.7;
       return {score,trend:score>0?'bullish':score<0?'bearish':'neutral',weight:w,indicators:{ema:{fast:ef[ef.length-1],slow:es[es.length-1],cross:ec},rsi:{value:rv[rv.length-1],interpret:ri},macd:{interpret:mi},atr:{value:av[av.length-1]},volume:{ratio:vd.ratio,interpret:vi}}};
-    } catch(e) { this.#logger.warn('Calc error:',e.message); return null; }
+    } catch(e) { return null; }
   }
 }
