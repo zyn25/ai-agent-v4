@@ -6,6 +6,7 @@ import { EventEmitter } from 'events';
 export class TradeManager extends EventEmitter {
   #config; #logger; #db; #exchange; #signalEngine; #riskEngine; #aiValidator; #eventBus;
   #pm; #posRepo; #portRepo; #running=false; #loop=null; #reconnect=0;
+  #paused=false; #pauseReason=''; #lastTradeTime=0;
 
   constructor(c,l,db,ex,se,re,av,eb) {
     super(); this.#config=c; this.#logger=l; this.#db=db; this.#exchange=ex;
@@ -18,13 +19,67 @@ export class TradeManager extends EventEmitter {
     const open=this.#posRepo.findOpen(); open.forEach(p=>this.#pm.track(p));
     if(open.length) this.#logger.info('Restored '+open.length+' positions');
     this.#running=true;
-    this.#loop=setInterval(async()=>{ if(!this.#running)return; try{await this.#tick();}catch(e){this.#logger.error('Loop:',e.message);} },60000);
+    this.#loop=setInterval(async()=>{ if(!this.#running||this.#paused)return; try{await this.#tick();}catch(e){this.#logger.error('Loop:',e.message);} },60000);
+    this.#startEquityTracking();
     this.#logger.info('TradeManager initialized');
   }
 
+  #startEquityTracking() {
+    setInterval(()=>{
+      try {
+        const p=this.#portRepo.getCurrent(); if(!p) return;
+        const open=this.#posRepo.findOpen();
+        let unrealized=0;
+        for(const pos of open) { unrealized+=(pos.unrealized_pnl||0); }
+        const equity=p.balance+unrealized;
+        const peak=Math.max(p.peak_balance||p.balance, equity);
+        const dd=peak>0?((peak-equity)/peak)*100:0;
+        this.#db.prepare('INSERT INTO equity_curve (balance,equity,drawdown,drawdown_pct,peak_balance,open_positions) VALUES (?,?,?,?,?,?)').run(p.balance,equity,peak-equity,dd,peak,open.length);
+      } catch(e){}
+    }, 3600000);
+  }
+
+  // ===== EMERGENCY CONTROLS =====
+  pause(reason) { this.#paused=true; this.#pauseReason=reason||'Manual pause'; this.#logger.warn('Trading PAUSED: '+this.#pauseReason); this.#eventBus.emit('trade:paused', {reason:this.#pauseReason}); }
+  resume() { this.#paused=false; this.#pauseReason=''; this.#logger.info('Trading RESUMED'); this.#eventBus.emit('trade:resumed', {}); }
+  get isPaused() { return this.#paused; }
+  get pauseReason() { return this.#pauseReason; }
+
+  async closeAll(reason) {
+    const open=this.#pm.getAll();
+    this.#logger.warn('EMERGENCY: Closing all '+open.length+' positions. Reason: '+reason);
+    for(const pos of open) {
+      try {
+        const ticker=await this.#exchange.fetchTicker(pos.pair);
+        const price=ticker.last;
+        const pnl=(pos.side==='long'?price-pos.entry_price:pos.entry_price-price)*(pos.remaining_quantity||pos.quantity);
+        await this.#closePosition(pos,price,'emergency_'+reason,pnl);
+      } catch(e) { this.#logger.error('Emergency close error '+pos.id+':',e.message); }
+    }
+    this.pause('Emergency: '+reason);
+  }
+
+  async closeLast(reason) {
+    const open=this.#pm.getAll();
+    if(!open.length) return;
+    const pos=open[open.length-1];
+    try {
+      const ticker=await this.#exchange.fetchTicker(pos.pair);
+      const price=ticker.last;
+      const pnl=(pos.side==='long'?price-pos.entry_price:pos.entry_price-price)*(pos.remaining_quantity||pos.quantity);
+      await this.#closePosition(pos,price,'manual_close',pnl);
+    } catch(e) { this.#logger.error('Close last error:',e.message); }
+  }
+
+  // ===== TRADING LOOP =====
   async #tick() {
     try { await this.#monitor(); this.#reconnect=0; }
     catch(e) { this.#logger.error('Monitor:',e.message); this.#reconnect++; if(this.#reconnect>=5){this.#logger.error('Exchange down. Pause 5min.');await this.#sleep(300000);this.#reconnect=0;} return; }
+
+    // Cooldown check
+    const cooldownMs=this.#config.risk.cooldownMinutes*60000;
+    if(Date.now()-this.#lastTradeTime<cooldownMs) return;
+
     const can=await this.#riskEngine.canTrade(); if(!can.allowed)return;
     const sig=await this.#signalEngine.analyze(); if(sig.side==='neutral')return;
     this.#logger.trade('Signal: '+sig.side+' | '+sig.confidence+'%');
@@ -44,9 +99,11 @@ export class TradeManager extends EventEmitter {
       if(sz.marginRequired>bal){this.#logger.warn('No margin');return;}
       const id='T-'+Date.now().toString(36)+'-'+Math.random().toString(36).substring(2,8);
       const pos={id:id.toUpperCase(),pair:this.#config.exchange.pair,side:sig.side,entry_price:entry,quantity:sz.quantity,leverage:sz.leverage,stop_loss:lv.stopLoss,take_profit:lv.takeProfit,status:'open',ai_confidence:ai.confidence,ai_decision:ai.decision,strategy_version:'v4',open_time:new Date().toISOString()};
-      this.#posRepo.create(pos); this.#pm.track({...pos,break_even_price:lv.breakEven});
+      this.#posRepo.create(pos);
+      this.#pm.track({...pos,break_even_price:lv.breakEven,partial_tp_index:0,remaining_quantity:sz.quantity});
+      this.#lastTradeTime=Date.now();
       this.#eventBus.emit('trade:opened',{...pos,riskAmount:sz.riskAmount,confidence:ai.confidence});
-      this.#logger.trade('Opened: '+pos.id+' | '+sig.side+' @ '+entry);
+      this.#logger.trade('Opened: '+pos.id+' | '+sig.side+' @ '+entry+' | Qty: '+sz.quantity);
     } catch(e) { this.#logger.error('Execute:',e.message); }
   }
 
@@ -57,24 +114,74 @@ export class TradeManager extends EventEmitter {
   }
 
   async #check(pos,price) {
-    const pnl=(pos.side==='long'?price-pos.entry_price:pos.entry_price-price)*pos.quantity;
-    if(pos.side==='long'?price<=pos.stop_loss:price>=pos.stop_loss) { await this.#close(pos,price,'stop_loss',pnl); return; }
-    if(pos.side==='long'?price>=pos.take_profit:price<=pos.take_profit) { await this.#close(pos,price,'take_profit',pnl); return; }
-    if(Date.now()-new Date(pos.open_time).getTime()>this.#config.risk.maxHoldHours*3600000) { await this.#close(pos,price,'max_hold',pnl); return; }
-    if(!pos.break_even_applied&&pos.break_even_price) {
-      const be=this.#riskEngine.shouldBreakEven(price,pos.entry_price,pos.break_even_price,pos.side);
-      if(be) { this.#pm.update(pos.id,{stop_loss:pos.entry_price,break_even_applied:true}); this.#posRepo.update(pos.id,{stop_loss:pos.entry_price,break_even_applied:1}); this.#logger.trade('BE: '+pos.id); }
+    const qty=pos.remaining_quantity||pos.quantity;
+    const pnl=(pos.side==='long'?price-pos.entry_price:pos.entry_price-price)*qty;
+
+    // Stop loss
+    if(pos.side==='long'?price<=pos.stop_loss:price>=pos.stop_loss) { await this.#closePosition(pos,price,'stop_loss',pnl); return; }
+
+    // Max hold
+    if(Date.now()-new Date(pos.open_time).getTime()>this.#config.risk.maxHoldHours*3600000) { await this.#closePosition(pos,price,'max_hold',pnl); return; }
+
+    // Partial Take Profit
+    const ptpIndex=pos.partial_tp_index||0;
+    const ptp=this.#riskEngine.shouldPartialTP(price,pos.entry_price,pos.side,ptpIndex);
+    if(ptp) {
+      const closeQty=qty*(ptp.sizePercent/100);
+      if(closeQty>0.0001) {
+        const closePnl=(pos.side==='long'?price-pos.entry_price:pos.entry_price-price)*closeQty;
+        const fees=closeQty*price*0.0004;
+        const slip=closeQty*price*0.0001;
+        const net=closePnl-fees-slip;
+        const remaining=qty-closeQty;
+        const newIdx=ptpIndex+1;
+
+        this.#pm.update(pos.id,{remaining_quantity:remaining,partial_tp_index:newIdx});
+        this.#posRepo.partialClose(pos.id,closeQty,net,fees,slip,remaining,newIdx);
+        this.#portRepo.updateBalance(net,true);
+
+        this.#eventBus.emit('trade:partial_close',{...pos,closePrice:price,closeQty:closeQty,pnl:net,level:newIdx,remaining:remaining});
+        this.#logger.trade('Partial TP #'+newIdx+': '+pos.id+' | Closed '+closeQty.toFixed(4)+' @ '+price+' | $'+net.toFixed(2)+' | Remaining: '+remaining.toFixed(4));
+
+        // Move SL to break even after first partial TP
+        if(newIdx===1) {
+          this.#pm.update(pos.id,{stop_loss:pos.entry_price,break_even_applied:true});
+          this.#posRepo.update(pos.id,{stop_loss:pos.entry_price,break_even_applied:1});
+          this.#logger.trade('SL moved to break even: '+pos.id);
+        }
+
+        // If all quantity closed
+        if(remaining<=0.0001) {
+          await this.#closePosition(pos,price,'all_tp_hit',0);
+          return;
+        }
+      }
     }
+
+    // Final take profit (remaining quantity)
+    if(pos.side==='long'?price>=pos.take_profit:price<=pos.take_profit) { await this.#closePosition(pos,price,'take_profit',pnl); return; }
+
+    // Break even
+    if(!pos.break_even_applied&&pos.break_even_price) {
+      if(this.#riskEngine.shouldBreakEven(price,pos.entry_price,pos.break_even_price,pos.side)) {
+        this.#pm.update(pos.id,{stop_loss:pos.entry_price,break_even_applied:true});
+        this.#posRepo.update(pos.id,{stop_loss:pos.entry_price,break_even_applied:1});
+        this.#logger.trade('BE: '+pos.id);
+      }
+    }
+
+    // Trailing stop
     const atr=Math.abs(pos.entry_price-pos.stop_loss)/this.#config.indicators.atrSlMultiplier;
     const ts=this.#riskEngine.getTrailingStop(price,atr,pos.side);
-    if(pos.trailing_stop&&((pos.side==='long'&&price<=pos.trailing_stop)||(pos.side==='short'&&price>=pos.trailing_stop))) { await this.#close(pos,price,'trailing_stop',pnl); return; }
+    if(pos.trailing_stop&&((pos.side==='long'&&price<=pos.trailing_stop)||(pos.side==='short'&&price>=pos.trailing_stop))) { await this.#closePosition(pos,price,'trailing_stop',pnl); return; }
     if(ts&&(!pos.trailing_stop||(pos.side==='long'&&ts>pos.trailing_stop)||(pos.side==='short'&&ts<pos.trailing_stop))) { this.#pm.update(pos.id,{trailing_stop:ts}); this.#posRepo.update(pos.id,{trailing_stop:ts}); }
   }
 
-  async #close(pos,price,reason,pnl) {
-    const fees=price*pos.quantity*0.0004; const slip=price*pos.quantity*0.0001;
+  async #closePosition(pos,price,reason,pnl) {
+    const qty=pos.remaining_quantity||pos.quantity;
+    const fees=price*qty*0.0004; const slip=price*qty*0.0001;
     const net=pnl-fees-slip;
-    const roi=pos.entry_price>0&&pos.quantity>0?(net/(pos.entry_price*pos.quantity))*100:0;
+    const roi=pos.entry_price>0&&qty>0?(net/(pos.entry_price*qty))*100:0;
     const hold=Date.now()-new Date(pos.open_time).getTime();
     this.#posRepo.closePosition(pos.id,price,net,roi,fees,slip,reason,hold);
     this.#portRepo.updateBalance(net,net>0); this.#portRepo.updateWinRate();
@@ -88,4 +195,5 @@ export class TradeManager extends EventEmitter {
   async shutdown() { this.#running=false; if(this.#loop){clearInterval(this.#loop);this.#loop=null;} this.#logger.info('TradeManager shutdown'); }
   getOpenPositions() { return this.#pm.getAll(); }
   getPortfolio() { return this.#portRepo.getCurrent(); }
+  getLastTradeTime() { return this.#lastTradeTime; }
 }
