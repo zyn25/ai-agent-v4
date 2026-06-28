@@ -7,15 +7,10 @@ export class Optimizer {
     this.#baseConfig = config;
   }
 
-  /**
-   * Grid search optimization
-   * Tests combinations of parameters and finds best
-   */
   async gridSearch(exchange, pair, timeframe, days) {
     const paramGrid = {
       emaFast: [20, 30, 50],
       emaSlow: [100, 150, 200],
-      rsiPeriod: [10, 14, 20],
       atrSlMultiplier: [1.5, 2.0, 2.5, 3.0],
       atrTpMultiplier: [2.0, 3.0, 4.0, 5.0],
       confidenceThreshold: [50, 60, 70, 80]
@@ -28,7 +23,6 @@ export class Optimizer {
 
     let count = 0;
     console.log('Testing ' + total + ' combinations...');
-    console.log('');
 
     for (const ef of paramGrid.emaFast) {
       for (const es of paramGrid.emaSlow) {
@@ -39,6 +33,7 @@ export class Optimizer {
             for (const ct of paramGrid.confidenceThreshold) {
               count++;
 
+              // Clone config by extracting getter values
               const config = this.#cloneConfig();
               config.indicators.emaFast = ef;
               config.indicators.emaSlow = es;
@@ -56,7 +51,6 @@ export class Optimizer {
               const pnl = parseFloat(result.totalPnl) || 0;
               const dd = parseFloat(result.maxDrawdown) || 0;
 
-              // Score: weighted combination
               const score = (pf * 30) + (wr * 0.3) + (pnl / 100) - (dd * 0.5);
 
               results.push({
@@ -80,6 +74,22 @@ export class Optimizer {
   }
 
   #cloneConfig() {
-    return JSON.parse(JSON.stringify(this.#baseConfig));
+    // Extract values from Config getters (private fields can't be serialized)
+    const c = this.#baseConfig;
+    return {
+      exchange: { ...c.exchange },
+      trading: { ...c.trading },
+      indicators: { ...c.indicators },
+      risk: {
+        ...c.risk,
+        partialTpLevels: [...c.risk.partialTpLevels],
+        partialTpSizes: [...c.risk.partialTpSizes]
+      },
+      timeframes: { ...c.timeframes },
+      ai: { ...c.ai },
+      telegram: { ...c.telegram },
+      logging: { ...c.logging },
+      pairs: [...c.pairs]
+    };
   }
 }
