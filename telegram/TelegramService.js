@@ -3,17 +3,19 @@ import { MessageFormatter } from './MessageFormatter.js';
 import { PortfolioRepository } from '../database/repositories/PortfolioRepository.js';
 import { PositionRepository } from '../database/repositories/PositionRepository.js';
 import { PositionSizer } from '../risk/PositionSizer.js';
+import { TradeJournal } from '../reports/TradeJournal.js';
 import { totalmem, freemem } from 'os';
 
 export class TelegramService {
   #config; #logger; #eventBus; #tradeManager; #bot=null; #fmt; #chatId;
-  #portRepo; #posRepo; #db; #sizer; #lastRestart=0; #restartCount=0;
+  #portRepo; #posRepo; #db; #sizer; #journal; #lastRestart=0; #restartCount=0;
 
   constructor(c,l,eb,tm,db) {
     this.#config=c; this.#logger=l; this.#eventBus=eb; this.#tradeManager=tm;
     this.#fmt=new MessageFormatter(); this.#chatId=c.telegram.chatId;
     this.#portRepo=new PortfolioRepository(db); this.#posRepo=new PositionRepository(db);
     this.#db=db; this.#sizer=new PositionSizer(c);
+    this.#journal=new TradeJournal(db,l);
   }
 
   async initialize() {
@@ -61,13 +63,15 @@ export class TelegramService {
     this.#bot.onText(/\/closelast/,()=>{this.#tradeManager.closeLast('telegram');this.#send('🔴 Closing last...');});
     this.#bot.onText(/\/orderbook/,async()=>this.#cmdOrderbook());
     this.#bot.onText(/\/kelly/,()=>this.#cmdKelly());
+    this.#bot.onText(/\/summary/,()=>this.#cmdSummary());
+    this.#bot.onText(/\/journal/,()=>this.#cmdJournal());
   }
 
   #helpText() {
     return '📋 <b>COMMANDS</b>\n\n' +
       '📊 <b>Info:</b>\n/status /positions /balance /trades /stats /equity\n\n' +
+      '📈 <b>Analysis:</b>\n/orderbook /kelly /summary /journal\n\n' +
       '⚙️ <b>Settings:</b>\n/config /risk /health\n\n' +
-      '📈 <b>Analysis:</b>\n/orderbook /kelly\n\n' +
       '🚨 <b>Emergency:</b>\n/pause /resume /closeall /closelast';
   }
 
@@ -98,7 +102,7 @@ export class TelegramService {
 
   #cmdRisk() {
     const r=this.#config.risk;
-    this.#send('🛡️ <b>RISK</b>\n\nRisk/Trade: '+r.riskPerTrade+'%\nMax Daily: '+r.maxDailyLoss+'%\nMax Pos: '+r.maxOpenPositions+'\nMax Hold: '+r.maxHoldHours+'h\nPartial TP: '+r.partialTpLevels.join('/')+'R\nPartial Size: '+r.partialTpSizes.join('/')+'%\nCooldown: '+r.cooldownMinutes+'min');
+    this.#send('🛡️ <b>RISK</b>\n\nRisk/Trade: '+r.riskPerTrade+'%\nMax Daily: '+r.maxDailyLoss+'%\nMax Pos: '+r.maxOpenPositions+'\nMax Hold: '+r.maxHoldHours+'h\nPartial TP: '+r.partialTpLevels.join('/')+'R\nCooldown: '+r.cooldownMinutes+'min');
   }
 
   #cmdHealth() {
@@ -124,20 +128,8 @@ export class TelegramService {
       await this.#send('⏳ Fetching orderbook...');
       const ob=await this.#tradeManager.orderbook.analyze(this.#config.exchange.pair);
       if(!ob){this.#send('❌ Orderbook error');return;}
-      this.#send(
-        '📖 <b>ORDERBOOK</b>\n\n' +
-        'Pair: '+ob.pair+'\n' +
-        'Mid: $'+ob.midPrice.toFixed(2)+'\n' +
-        'Spread: '+ob.spreadPercent.toFixed(4)+'%\n' +
-        'Bid Vol: '+ob.bidVolume.toFixed(2)+'\n' +
-        'Ask Vol: '+ob.askVolume.toFixed(2)+'\n' +
-        'Ratio: '+ob.bidAskRatio.toFixed(2)+'\n' +
-        'Bias: '+ob.bias+'\n' +
-        'Liquidity: '+ob.liquidity+'\n' +
-        'Large Bids: '+ob.largeBids+'\n' +
-        'Large Asks: '+ob.largeAsks
-      );
-    } catch(e){this.#send('Orderbook error: '+e.message);}
+      this.#send('📖 <b>ORDERBOOK</b>\n\nPair: '+ob.pair+'\nMid: $'+ob.midPrice.toFixed(2)+'\nSpread: '+ob.spreadPercent.toFixed(4)+'%\nBid Vol: '+ob.bidVolume.toFixed(2)+'\nAsk Vol: '+ob.askVolume.toFixed(2)+'\nRatio: '+ob.bidAskRatio.toFixed(2)+'\nBias: '+ob.bias+'\nLiquidity: '+ob.liquidity);
+    } catch(e){this.#send('Orderbook error');}
   }
 
   #cmdKelly() {
@@ -145,20 +137,37 @@ export class TelegramService {
     const p=this.#portRepo.getCurrent();
     const bal=p?p.balance:this.#config.trading.startingBalance;
     const k=this.#sizer.calculateKelly(trades,bal);
-    this.#send(
-      '🎯 <b>KELLY CRITERION</b>\n\n' +
-      'Trades: '+(trades?trades.length:0)+'\n' +
-      'Win Rate: '+(k.winRate||'N/A')+'\n' +
-      'Avg Win: $'+(k.avgWin||'0')+'\n' +
-      'Avg Loss: $'+(k.avgLoss||'0')+'\n' +
-      'Payoff: '+(k.payoffRatio||'N/A')+'\n' +
-      'Kelly: '+(k.kelly||'N/A')+'\n' +
-      'Half-Kelly: '+(k.kellyHalf||'N/A')+'\n' +
-      'Recommended: '+(k.sizePercent||'1.00')+'%\n' +
-      'Amount: $'+(k.sizeAmount||(bal*0.01).toFixed(2))+'\n' +
-      'Confidence: '+(k.confidence||'low')+'\n' +
-      'Reason: '+(k.reason||'Need more trades')
-    );
+    this.#send('🎯 <b>KELLY</b>\n\nTrades: '+(trades?trades.length:0)+'\nWin Rate: '+(k.winRate||'N/A')+'\nPayoff: '+(k.payoffRatio||'N/A')+'\nKelly: '+(k.kelly||'N/A')+'\nRecommended: '+(k.sizePercent||'0.50')+'%\nConfidence: '+(k.confidence||'low'));
+  }
+
+  #cmdSummary() {
+    try {
+      const summary = this.#journal.getPerformanceSummary(30);
+      if(!summary){this.#send('No trades yet');return;}
+      this.#send(
+        '📊 <b>30-DAY SUMMARY</b>\n\n' +
+        'Trades: '+summary.totalTrades+'\n' +
+        'Win Rate: '+summary.winRate+'\n' +
+        'PnL: $'+summary.totalPnl+'\n' +
+        'Profit Factor: '+summary.profitFactor+'\n' +
+        'Sharpe: '+summary.sharpeRatio+'\n' +
+        'Sortino: '+summary.sortinoRatio+'\n' +
+        'Max DD: $'+summary.maxDrawdown+'\n' +
+        'Best: $'+summary.bestTrade+'\n' +
+        'Worst: $'+summary.worstTrade+'\n' +
+        'Avg Hold: '+summary.avgHoldHours+'h\n' +
+        'Win Streak: '+summary.maxWinStreak+'\n' +
+        'Loss Streak: '+summary.maxLossStreak
+      );
+    } catch(e){this.#send('Summary error: '+e.message);}
+  }
+
+  #cmdJournal() {
+    try {
+      const result = this.#journal.exportToCSV(30);
+      if(!result){this.#send('No trades to export');return;}
+      this.#send('📄 <b>JOURNAL EXPORTED</b>\n\nFile: '+result.filepath+'\nTrades: '+result.count);
+    } catch(e){this.#send('Journal error');}
   }
 
   async sendAlert(m){await this.#send('⚠️ '+m);}
