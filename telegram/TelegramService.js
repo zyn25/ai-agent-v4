@@ -13,23 +13,14 @@ export class TelegramService {
   async initialize() {
     if(!this.#config.telegram.enabled){this.#logger.info('Telegram disabled');return;}
     try {
-      this.#bot=new TelegramBot(this.#config.telegram.botToken,{polling:true});
+      this.#bot=new TelegramBot(this.#config.telegram.botToken,{polling:false});
       this.#eventBus.on('trade:opened',d=>this.#send(this.#fmt.formatEntry(d)));
       this.#eventBus.on('trade:closed',d=>this.#send(this.#fmt.formatExit(d)));
-      this.#bot.onText(/\/start/,()=>this.#send('🤖 <b>AI Agent V4</b>\n\n/status\n/positions\n/stats'));
-      this.#bot.onText(/\/status/,()=>{const p=this.#portRepo.getCurrent();const pos=this.#posRepo.findOpen();this.#send(this.#fmt.formatDashboard(p,pos));});
-      this.#bot.onText(/\/positions/,()=>{this.#send(this.#fmt.formatOpenPositions(this.#posRepo.findOpen()));});
-      this.#bot.onText(/\/stats/,()=>{const s=this.#posRepo.getStats();if(!s||!s.total){this.#send('No trades yet.');return;}const wr=s.total>0?((s.wins/s.total)*100).toFixed(1):'0';this.#send('📈 <b>STATS</b>\n\nTrades: '+s.total+'\nWins: '+s.wins+'\nWin Rate: '+wr+'%\nPnL: $'+s.total_pnl.toFixed(2));});
-      this.#bot.on('polling_error',e=>{
-        if(e.code==='EFATAL') {
-          this.#logger.warn('Telegram polling fatal, restarting in 5s...');
-          setTimeout(()=>{try{this.#bot.stopPolling();this.#bot.startPolling();}catch{}},5000);
-        }
-      });
-      this.#logger.info('Telegram initialized');
+      await this.#send('🤖 <b>AI Agent V4 Online</b>\n\nTrading loop: 60s\nMode: Paper Trading');
+      this.#logger.info('Telegram initialized (send-only mode)');
     } catch(e){this.#logger.error('TG init fail:',e.message);}
   }
   async sendAlert(m){await this.#send('⚠️ '+m);}
   async sendReport(m){await this.#send(m);}
-  async #send(t){if(!this.#bot||!this.#chatId)return;try{await this.#bot.sendMessage(this.#chatId,t,{parse_mode:'HTML'});}catch(e){this.#logger.error('TG send:',e.message);}}
+  async #send(t){if(!this.#bot||!this.#chatId)return;try{await this.#bot.sendMessage(this.#chatId,t,{parse_mode:'HTML'});this.#logger.telegram('Message sent');}catch(e){this.#logger.error('TG send:',e.message);}}
 }
