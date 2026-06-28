@@ -4,63 +4,27 @@ import { PortfolioRepository } from '../database/repositories/PortfolioRepositor
 import { PositionRepository } from '../database/repositories/PositionRepository.js';
 
 export class TelegramService {
-  #config; #logger; #eventBus; #tradeManager; #bot = null; #formatter; #chatId;
-  #portfolioRepo; #positionRepo;
-
-  constructor(config, logger, eventBus, tradeManager, database) {
-    this.#config = config; this.#logger = logger; this.#eventBus = eventBus;
-    this.#tradeManager = tradeManager; this.#formatter = new MessageFormatter();
-    this.#chatId = config.telegram.chatId;
-    this.#portfolioRepo = new PortfolioRepository(database.db);
-    this.#positionRepo = new PositionRepository(database.db);
+  #config; #logger; #eventBus; #tradeManager; #bot=null; #fmt; #chatId; #portRepo; #posRepo;
+  constructor(c,l,eb,tm,db) {
+    this.#config=c; this.#logger=l; this.#eventBus=eb; this.#tradeManager=tm;
+    this.#fmt=new MessageFormatter(); this.#chatId=c.telegram.chatId;
+    this.#portRepo=new PortfolioRepository(db); this.#posRepo=new PositionRepository(db);
   }
-
   async initialize() {
-    if (!this.#config.telegram.enabled) { this.#logger.info('Telegram disabled'); return; }
+    if(!this.#config.telegram.enabled){this.#logger.info('Telegram disabled');return;}
     try {
-      this.#bot = new TelegramBot(this.#config.telegram.botToken, { polling: true });
-      this.#setupEventListeners();
-      this.#setupCommands();
-      this.#bot.on('polling_error', (error) => { this.#logger.error('Telegram polling error:', error.message); });
+      this.#bot=new TelegramBot(this.#config.telegram.botToken,{polling:true});
+      this.#eventBus.on('trade:opened',d=>this.#send(this.#fmt.formatEntry(d)));
+      this.#eventBus.on('trade:closed',d=>this.#send(this.#fmt.formatExit(d)));
+      this.#bot.onText(/\/start/,()=>this.#send('🤖 <b>AI Agent V4</b>\n\n/status\n/positions\n/stats'));
+      this.#bot.onText(/\/status/,()=>{const p=this.#portRepo.getCurrent();const pos=this.#posRepo.findOpen();this.#send(this.#fmt.formatDashboard(p,pos));});
+      this.#bot.onText(/\/positions/,()=>{this.#send(this.#fmt.formatOpenPositions(this.#posRepo.findOpen()));});
+      this.#bot.onText(/\/stats/,()=>{const s=this.#posRepo.getStats();if(!s||!s.total){this.#send('No trades yet.');return;}const wr=s.total>0?((s.wins/s.total)*100).toFixed(1):'0';this.#send('📈 <b>STATS</b>\n\nTrades: '+s.total+'\nWins: '+s.wins+'\nWin Rate: '+wr+'%\nPnL: $'+s.total_pnl.toFixed(2));});
+      this.#bot.on('polling_error',e=>this.#logger.error('TG poll:',e.message));
       this.#logger.info('Telegram initialized');
-    } catch (e) { this.#logger.error('Telegram init failed:', e.message); }
+    } catch(e){this.#logger.error('TG init fail:',e.message);}
   }
-
-  #setupEventListeners() {
-    this.#eventBus.on('trade:opened', d => this.#send(this.#formatter.formatEntry(d)));
-    this.#eventBus.on('trade:closed', d => this.#send(this.#formatter.formatExit(d)));
-  }
-
-  #setupCommands() {
-    if (!this.#bot) return;
-    this.#bot.onText(/\/start/, () => this.#send('🤖 <b>AI Agent V4</b>\n\n/status - Dashboard\n/positions - Open positions'));
-    this.#bot.onText(/\/status/, () => {
-      const p = this.#portfolioRepo.getCurrent();
-      const pos = this.#positionRepo.findOpen();
-      this.#send(this.#formatter.formatDashboard(p, pos));
-    });
-    this.#bot.onText(/\/positions/, () => {
-      const pos = this.#positionRepo.findOpen();
-      this.#send(this.#formatter.formatOpenPositions(pos));
-    });
-    this.#bot.onText(/\/stats/, () => {
-      const stats = this.#positionRepo.getStats();
-      this.#send(this.#formatStats(stats));
-    });
-  }
-
-  #formatStats(s) {
-    const wr = s.total > 0 ? ((s.wins / s.total) * 100).toFixed(1) : '0.0';
-    const pf = s.losses > 0 ? (Math.abs(s.total_pnl / s.worst_trade)).toFixed(2) : 'N/A';
-    return `📈 <b>ALL-TIME STATS</b>\n\nTrades: ${s.total}\nWins: ${s.wins}\nLosses: ${s.losses}\nWin Rate: ${wr}%\nTotal PnL: $${s.total_pnl.toFixed(2)}\nBest: $${s.best_trade.toFixed(2)}\nWorst: $${s.worst_trade.toFixed(2)}\nAvg PnL: $${s.avg_pnl.toFixed(2)}`;
-  }
-
-  async sendAlert(msg) { await this.#send(`⚠️ ALERT\n\n${msg}`); }
-  async sendReport(msg) { await this.#send(msg); }
-
-  async #send(text) {
-    if (!this.#bot || !this.#chatId) return;
-    try { await this.#bot.sendMessage(this.#chatId, text, { parse_mode: 'HTML' }); }
-    catch (e) { this.#logger.error('Telegram send failed:', e.message); }
-  }
+  async sendAlert(m){await this.#send('⚠️ '+m);}
+  async sendReport(m){await this.#send(m);}
+  async #send(t){if(!this.#bot||!this.#chatId)return;try{await this.#bot.sendMessage(this.#chatId,t,{parse_mode:'HTML'});}catch(e){this.#logger.error('TG send:',e.message);}}
 }

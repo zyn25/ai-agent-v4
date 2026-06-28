@@ -31,6 +31,7 @@ class App {
       this.#logger.info('AI Agent V4 started successfully');
     } catch (error) {
       console.error('Fatal startup error:', error.message);
+      console.error(error.stack);
       process.exit(1);
     }
   }
@@ -46,7 +47,6 @@ class App {
     this.#container.register('logger', logger);
     this.#container.register('database', database);
 
-    // Exchange with retry
     let exchange = null;
     const exchangeFactory = new ExchangeFactory(config, logger);
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -54,7 +54,7 @@ class App {
         exchange = await exchangeFactory.create();
         break;
       } catch (error) {
-        logger.warn(`Exchange attempt ${attempt}/3 failed: ${error.message}`);
+        logger.warn('Exchange attempt ' + attempt + '/3 failed: ' + error.message);
         if (attempt === 3) throw error;
         await new Promise(r => setTimeout(r, 5000 * attempt));
       }
@@ -82,7 +82,6 @@ class App {
     const reportService = new ReportService(config, logger, database, telegram);
     this.#container.register('reportService', reportService);
 
-    // FIX: HealthMonitor now takes exchange for connection checking
     const healthMonitor = new HealthMonitor(config, logger, telegram, database, exchange);
     this.#container.register('healthMonitor', healthMonitor);
   }
@@ -108,7 +107,7 @@ class App {
     const shutdown = async (signal) => {
       if (!this.#isRunning) return;
       this.#isRunning = false;
-      this.#logger.info(`Received ${signal}. Shutting down...`);
+      this.#logger.info('Received ' + signal + '. Shutting down...');
       try {
         this.#container.resolve('tradeManager').shutdown();
         this.#container.resolve('reportService').stop();
@@ -117,7 +116,7 @@ class App {
         this.#logger.info('Shutdown complete');
         process.exit(0);
       } catch (error) {
-        this.#logger.error('Shutdown error:', error);
+        console.error('Shutdown error:', error);
         process.exit(1);
       }
     };
