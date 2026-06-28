@@ -1,17 +1,19 @@
 import { PositionManager } from './PositionManager.js';
 import { PositionRepository } from '../database/repositories/PositionRepository.js';
 import { PortfolioRepository } from '../database/repositories/PortfolioRepository.js';
+import { OrderbookAnalyzer } from '../strategy/OrderbookAnalyzer.js';
 import { EventEmitter } from 'events';
 
 export class TradeManager extends EventEmitter {
   #config; #logger; #db; #exchange; #signalEngine; #riskEngine; #aiValidator; #eventBus;
-  #pm; #posRepo; #portRepo; #running=false; #loop=null; #reconnect=0;
+  #pm; #posRepo; #portRepo; #orderbook; #running=false; #loop=null; #reconnect=0;
   #paused=false; #pauseReason=''; #lastTradeTime=0;
 
   constructor(c,l,db,ex,se,re,av,eb) {
     super(); this.#config=c; this.#logger=l; this.#db=db; this.#exchange=ex;
     this.#signalEngine=se; this.#riskEngine=re; this.#aiValidator=av; this.#eventBus=eb;
-    this.#pm=new PositionManager(); this.#posRepo=new PositionRepository(db); this.#portRepo=new PortfolioRepository(db);
+    this.#pm=new PositionManager(); this.#posRepo=new PositionRepository(db);
+    this.#portRepo=new PortfolioRepository(db); this.#orderbook=new OrderbookAnalyzer(ex,l);
   }
 
   async initialize() {
@@ -69,7 +71,6 @@ export class TradeManager extends EventEmitter {
     } catch(e) { this.#logger.error('Close last error'); }
   }
 
-  // Multi-Pair Trading Loop
   async #tick() {
     try { await this.#monitor(); this.#reconnect=0; }
     catch(e) { this.#logger.error('Monitor:',e.message); this.#reconnect++; if(this.#reconnect>=5){await this.#sleep(300000);this.#reconnect=0;} return; }
@@ -79,30 +80,49 @@ export class TradeManager extends EventEmitter {
 
     const can=await this.#riskEngine.canTrade(); if(!can.allowed)return;
 
-    // Analyze all pairs
     const signals=await this.#signalEngine.analyzeAll();
     if(!signals.length) return;
 
-    // Pick best signal
     signals.sort((a,b) => b.confidence - a.confidence);
     const best=signals[0];
     this.#logger.trade('Signal: '+best.pair+' '+best.side+' | '+best.confidence+'%');
+
+    // Orderbook validation
+    const ob=await this.#orderbook.analyze(best.pair);
+    const obDecision=this.#orderbook.validateSignal(best,ob);
+    if(obDecision==='reject') {
+      this.#logger.trade('Orderbook REJECTED: '+best.pair);
+      return;
+    }
+    if(obDecision==='caution') {
+      this.#logger.trade('Orderbook CAUTION: '+best.pair+' (reducing size)');
+    }
 
     let ai={decision:'approve',confidence:best.confidence};
     if(this.#config.ai.enabled) {
       ai=await this.#aiValidator.validate(best);
       if(ai.decision!=='approve'){this.#logger.ai('Rejected: '+ai.reason);return;}
     }
-    await this.#execute(best,ai);
+    await this.#execute(best,ai,obDecision);
   }
 
-  async #execute(sig,ai) {
+  async #execute(sig,ai,obDecision) {
     try {
       const tk=await this.#exchange.fetchTicker(sig.pair); const entry=tk.last;
       const atr=sig.indicators?.primary?.indicators?.atr?.value||entry*0.01;
       const lv=this.#riskEngine.calculateLevels(entry,atr,sig.side);
       const bal=this.#portRepo.getCurrent()?.balance||this.#config.trading.startingBalance;
+
+      // Use Kelly sizing if enough trades
+      const closedTrades=this.#db.prepare("SELECT pnl FROM positions WHERE status='closed' ORDER BY close_time DESC LIMIT 50").all();
       const sz=this.#riskEngine.calculatePositionSize(bal,entry,lv.stopLoss);
+
+      // Reduce size if orderbook caution
+      if(obDecision==='caution') {
+        sz.quantity=sz.quantity*0.5;
+        sz.riskAmount=sz.riskAmount*0.5;
+      }
+
       if(sz.quantity<=0||sz.marginRequired>bal){this.#logger.warn('Skip: sizing');return;}
       const id='T-'+Date.now().toString(36)+'-'+Math.random().toString(36).substring(2,8);
       const pos={id:id.toUpperCase(),pair:sig.pair,side:sig.side,entry_price:entry,quantity:sz.quantity,leverage:sz.leverage,stop_loss:lv.stopLoss,take_profit:lv.takeProfit,status:'open',ai_confidence:ai.confidence,ai_decision:ai.decision,strategy_version:'v4',open_time:new Date().toISOString()};
@@ -110,7 +130,7 @@ export class TradeManager extends EventEmitter {
       this.#pm.track({...pos,break_even_price:lv.breakEven,partial_tp_index:0,remaining_quantity:sz.quantity});
       this.#lastTradeTime=Date.now();
       this.#eventBus.emit('trade:opened',{...pos,riskAmount:sz.riskAmount,confidence:ai.confidence});
-      this.#logger.trade('Opened: '+pos.id+' | '+sig.pair+' '+sig.side+' @ '+entry);
+      this.#logger.trade('Opened: '+pos.id+' | '+sig.pair+' '+sig.side+' @ '+entry+' | OB:'+obDecision);
     } catch(e) { this.#logger.error('Execute:',e.message); }
   }
 
@@ -151,7 +171,6 @@ export class TradeManager extends EventEmitter {
     if(pos.side==='long'?price>=pos.take_profit:price<=pos.take_profit) { await this.#close(pos,price,'take_profit',pnl); return; }
     if(!pos.break_even_applied&&pos.break_even_price&&this.#riskEngine.shouldBreakEven(price,pos.entry_price,pos.break_even_price,pos.side)) {
       this.#pm.update(pos.id,{stop_loss:pos.entry_price,break_even_applied:true}); this.#posRepo.update(pos.id,{stop_loss:pos.entry_price,break_even_applied:1});
-      this.#logger.trade('BE: '+pos.id);
     }
     const atr=Math.abs(pos.entry_price-pos.stop_loss)/this.#config.indicators.atrSlMultiplier;
     const ts=this.#riskEngine.getTrailingStop(price,atr,pos.side);
@@ -178,4 +197,5 @@ export class TradeManager extends EventEmitter {
   getOpenPositions() { return this.#pm.getAll(); }
   getPortfolio() { return this.#portRepo.getCurrent(); }
   getLastTradeTime() { return this.#lastTradeTime; }
+  get orderbook() { return this.#orderbook; }
 }
