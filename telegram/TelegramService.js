@@ -95,9 +95,10 @@ export class TelegramService {
       const pos = this.#posRepo.findOpen();
       const prices = await this.#fetchPrices();
       const s = this.#posRepo.getStats();
-      const pf = s && s.losses > 0 && s.total_pnl ? (Math.abs(s.total_pnl) / Math.abs(s.worst_trade || 1)).toFixed(2) : 'N/A';
-      const avgHold = s && s.total > 0 ? (s.avg_hold_duration / 3600000).toFixed(1) + 'h' : 'N/A';
-      const t = this.#ts();
+
+      const pf = s && s.total > 0 && s.losses > 0 ? (Math.abs(s.total_pnl) / Math.abs(s.worst_trade || 1)).toFixed(2) : 'N/A';
+      const avgHoldMs = s && s.total > 0 ? (s.avg_hold_duration || 0) : 0;
+      const avgHoldH = avgHoldMs > 0 ? (avgHoldMs / 3600000).toFixed(1) + 'h' : 'N/A';
 
       let floatingPnl = 0;
       let posLines = '';
@@ -118,21 +119,21 @@ export class TelegramService {
 
       this.#send(
         '📊 <b>DASHBOARD</b>\n\n' +
-        'Balance:      <code>$' + (p?.balance || 0).toFixed(2) + '</code>\n' +
-        'Equity:       <code>$' + totalEquity.toFixed(2) + '</code>\n' +
-        'Floating:     <code>' + (floatingPnl >= 0 ? '+' : '') + '$' + floatingPnl.toFixed(2) + '</code>\n' +
-        'Realized:     <code>$' + (p?.realized_pnl || 0).toFixed(2) + '</code>\n' +
-        'Daily PnL:    <code>' + ((p?.daily_pnl || 0) >= 0 ? '+' : '') + '$' + (p?.daily_pnl || 0).toFixed(2) + '</code>\n' +
-        'Weekly:       <code>' + ((p?.weekly_pnl || 0) >= 0 ? '+' : '') + '$' + (p?.weekly_pnl || 0).toFixed(2) + '</code>\n' +
-        'DD:           <code>' + ddPct.toFixed(2) + '%</code>\n' +
-        'Win Rate:     <code>' + (p?.win_rate || 0).toFixed(1) + '%</code>\n' +
-        'Profit Factor:<code>' + pf + '</code>\n' +
-        'Avg Hold:     <code>' + avgHold + '</code>\n' +
-        'Open:         <code>' + (pos ? pos.length : 0) + '</code>\n\n' +
+        'Balance:       <code>$' + (p?.balance || 0).toFixed(2) + '</code>\n' +
+        'Equity:        <code>$' + totalEquity.toFixed(2) + '</code>\n' +
+        'Floating:      <code>' + (floatingPnl >= 0 ? '+' : '') + '$' + floatingPnl.toFixed(2) + '</code>\n' +
+        'Realized:      <code>$' + (p?.realized_pnl || 0).toFixed(2) + '</code>\n' +
+        'Daily PnL:     <code>' + ((p?.daily_pnl || 0) >= 0 ? '+' : '') + '$' + (p?.daily_pnl || 0).toFixed(2) + '</code>\n' +
+        'Weekly:        <code>' + ((p?.weekly_pnl || 0) >= 0 ? '+' : '') + '$' + (p?.weekly_pnl || 0).toFixed(2) + '</code>\n' +
+        'DD:            <code>' + ddPct.toFixed(2) + '%</code>\n' +
+        'Win Rate:      <code>' + (p?.win_rate || 0).toFixed(1) + '%</code>\n' +
+        'Profit Factor: <code>' + pf + '</code>\n' +
+        'Avg Hold:      <code>' + avgHoldH + '</code>\n' +
+        'Open:          <code>' + (pos ? pos.length : 0) + '</code>\n\n' +
         (posLines ? '📈 <b>POSITIONS:</b>\n' + posLines + '\n' : '') +
-        '🕐 ' + t
+        '🕐 ' + this.#ts()
       );
-    } catch(e) { this.#send('Status error'); }
+    } catch(e) { this.#send('Status error: ' + e.message); }
   }
 
   async #cmdPositions() {
@@ -153,14 +154,18 @@ export class TelegramService {
     const t=this.#posRepo.findAll(10);
     if(!t||!t.length){this.#send('No trades');return;}
     let m='📋 <b>TRADES</b>\n\n';
-    t.forEach(x=>{m+=(x.pnl>0?'💰':'💸')+' '+x.id+' | '+x.side+' | $'+(x.pnl||0).toFixed(2)+'\n';});
+    t.forEach(x=>{
+      const pnlStr = (x.pnl>=0?'+':'') + '$' + (x.pnl||0).toFixed(2);
+      const emoji = x.status==='open' ? '🟢' : (x.pnl>0?'💰':'💸');
+      m+=emoji+' '+x.id+' | '+x.side+' | '+pnlStr+' | '+(x.exit_reason||'open')+'\n';
+    });
     this.#send(m);
   }
 
   #cmdStats() {
     const s=this.#posRepo.getStats();
     if(!s||!s.total){this.#send('No trades');return;}
-    this.#send('📈 <b>STATS</b>\n\nTrades: '+s.total+'\nWins: '+s.wins+'\nRate: '+(s.total>0?((s.wins/s.total)*100).toFixed(1):0)+'%\nPnL: $'+s.total_pnl.toFixed(2)+'\nBest: $'+s.best_trade.toFixed(2)+'\nWorst: $'+s.worst_trade.toFixed(2)+'\nAvg: $'+s.avg_pnl.toFixed(2));
+    this.#send('📈 <b>STATS</b>\n\nTrades: '+s.total+'\nWins: '+s.wins+'\nLosses: '+s.losses+'\nRate: '+(s.total>0?((s.wins/s.total)*100).toFixed(1):0)+'%\nPnL: $'+s.total_pnl.toFixed(2)+'\nBest: $'+s.best_trade.toFixed(2)+'\nWorst: $'+s.worst_trade.toFixed(2)+'\nAvg: $'+s.avg_pnl.toFixed(2));
   }
 
   #cmdConfig() {
@@ -178,19 +183,7 @@ export class TelegramService {
     const ram=Math.round(((totalmem()-freemem())/totalmem())*100);
     const up=Math.round((Date.now()-this.#startTime)/1000);
     const h=Math.floor(up/3600); const m=Math.floor((up%3600)/60);
-    const p=this.#posRepo.getStats();
-    this.#send(
-      '🏥 <b>HEALTH</b>\n\n' +
-      'RAM: '+ram+'%\n' +
-      'Uptime: '+h+'h '+m+'m\n' +
-      'Positions: '+this.#posRepo.countOpen()+'\n' +
-      'Mode: '+this.#strategyMode.getModeName()+'\n' +
-      'Status: '+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'\n' +
-      'Exchange: ✅\n' +
-      'Telegram: ✅\n' +
-      'AI: '+(this.#config.ai.enabled?'✅':'❌')+'\n' +
-      'DB: ✅'
-    );
+    this.#send('🏥 <b>HEALTH</b>\n\nRAM: '+ram+'%\nUptime: '+h+'h '+m+'m\nPositions: '+this.#posRepo.countOpen()+'\nMode: '+this.#strategyMode.getModeName()+'\nStatus: '+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'\nExchange: ✅\nTelegram: ✅\nAI: '+(this.#config.ai.enabled?'✅':'❌')+'\nDB: ✅');
   }
 
   #cmdEquity() {
@@ -240,7 +233,19 @@ export class TelegramService {
     try {
       const a=this.#analytics.getReport(30);
       if(!a.totalTrades){this.#send('No trades');return;}
-      this.#send('📊 <b>ANALYTICS (30D)</b>\n\nTrades: '+a.totalTrades+' | W: '+a.wins+' | L: '+a.losses+'\nWin Rate: '+a.winRate+'%\nPnL: $'+a.totalPnl+'\nPF: '+a.profitFactor+'\nExpectancy: $'+a.expectancy+'/trade\nSharpe: '+a.sharpeRatio+'\nSortino: '+a.sortinoRatio+'\nMax DD: '+a.maxDrawdownPct+'%\nWin Streak: '+a.maxWinStreak+' | Loss Streak: '+a.maxLossStreak+'\nBest Hour: '+a.bestHour+'\nAvg Hold: '+a.avgHoldHours+'h');
+      this.#send(
+        '📊 <b>ANALYTICS</b>\n\n' +
+        'Trades: '+a.totalTrades+' | W: '+a.wins+' | L: '+a.losses+'\n' +
+        'Win Rate: '+a.winRate+'%\n' +
+        'PnL: $'+a.totalPnl+'\n' +
+        'PF: '+a.profitFactor+'\n' +
+        'Expectancy: $'+a.expectancy+'/trade\n' +
+        'Sharpe: '+a.sharpeRatio+'\n' +
+        'Sortino: '+a.sortinoRatio+'\n' +
+        'Max DD: '+a.maxDrawdownPct+'%\n' +
+        'Win Streak: '+a.maxWinStreak+' | Loss Streak: '+a.maxLossStreak+'\n' +
+        'Avg Hold: '+a.avgHoldHours+'h'
+      );
     } catch(e){this.#send('Analytics error: '+e.message);}
   }
 
