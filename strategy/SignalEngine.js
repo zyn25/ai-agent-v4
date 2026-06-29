@@ -31,7 +31,6 @@ export class SignalEngine {
       
       // DEBUG: Log detailed signal info
       const threshold = this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : this.#config.indicators.confidenceThreshold;
-      this.#logger.trade('SIGNAL_DEBUG: '+targetPair+' | '+primary+':'+ps.trend+'('+ps.score.toFixed(1)+') | '+secondary+':'+ss.trend+'('+ss.score.toFixed(1)+') | '+tertiary+':'+ts.trend+'('+ts.score.toFixed(1)+') | MTF:'+mtf.toFixed(1)+' | Aligned:'+aligned+' | Threshold:'+threshold);
       
       if(!aligned) return {pair:targetPair,side:'neutral',confidence:0,reason:'Not aligned ('+ps.trend+'/'+ss.trend+'/'+ts.trend+')'};
       
