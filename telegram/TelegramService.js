@@ -102,7 +102,7 @@ export class TelegramService {
       const prices=await this.#fetchPrices();
       const s=this.#posRepo.getStats();
       const pf=s&&s.total>0&&s.losses>0?(Math.abs(s.total_pnl)/Math.abs(s.worst_trade||1)).toFixed(2):'N/A';
-      const avgHoldMs=s&&s.total>0?(s.avg_hold_duration||0):0;
+      const avgHoldMs=s&&s.total>0?(s.avg_hold_duration||s.avg_pnl||0):0;
       const avgHoldH=avgHoldMs>0?(avgHoldMs/3600000).toFixed(1)+'h':'N/A';
 
       let floatingPnl=0, posLines='';
