@@ -11,10 +11,25 @@ export class StrategyMode {
   constructor(logger, database) {
     this.#logger = logger;
     this.#db = database;
+    // FIX: Load mode from DB, default to 'aggressive' for first run
     try {
       const saved = database.prepare("SELECT value FROM settings WHERE key='strategy_mode'").get();
-      if (saved) this.#currentMode = JSON.parse(saved.value);
-    } catch {}
+      if (saved) {
+        const mode = JSON.parse(saved.value);
+        if (this.#modes[mode]) {
+          this.#currentMode = mode;
+          this.#logger.info('Strategy mode loaded: ' + mode);
+        }
+      } else {
+        // Default to aggressive for new installations
+        this.#currentMode = 'aggressive';
+        this.setMode('aggressive');
+        this.#logger.info('Strategy mode default: aggressive');
+      }
+    } catch {
+      this.#currentMode = 'aggressive';
+      this.#logger.info('Strategy mode fallback: aggressive');
+    }
   }
 
   getMode() { return this.#modes[this.#currentMode]; }
