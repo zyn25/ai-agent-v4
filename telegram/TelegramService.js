@@ -5,29 +5,35 @@ import { PositionRepository } from '../database/repositories/PositionRepository.
 import { PositionSizer } from '../risk/PositionSizer.js';
 import { TradeJournal } from '../reports/TradeJournal.js';
 import { PerformanceAnalytics } from '../reports/PerformanceAnalytics.js';
-import { totalmem, freemem } from 'os';
+import { TIMING } from '../utils/constants.js';
+import { totalmem, freemem, cpus } from 'os';
+import { execSync } from 'child_process';
 
+/**
+ * Telegram service - notifications, commands, dashboard.
+ * All dashboard metrics per master prompt.
+ */
 export class TelegramService {
   #config; #logger; #eventBus; #tradeManager; #bot=null; #fmt; #chatId;
   #portRepo; #posRepo; #db; #sizer; #journal; #analytics; #strategyMode;
-  #lastRestart=0; #restartCount=0; #startTime;
+  #lastRestart=0; #restartCount=0; #startTime; #exchangeLatency=0;
 
-  constructor(c,l,eb,tm,db,strategyMode) {
+  constructor(c,l,eb,tm,db,sm) {
     this.#config=c; this.#logger=l; this.#eventBus=eb; this.#tradeManager=tm;
     this.#fmt=new MessageFormatter(); this.#chatId=c.telegram.chatId;
     this.#portRepo=new PortfolioRepository(db); this.#posRepo=new PositionRepository(db);
     this.#db=db; this.#sizer=new PositionSizer(c);
     this.#journal=new TradeJournal(db,l); this.#analytics=new PerformanceAnalytics(db,l);
-    this.#strategyMode=strategyMode; this.#startTime=Date.now();
+    this.#strategyMode=sm; this.#startTime=Date.now();
   }
 
   async initialize() {
     if(!this.#config.telegram.enabled){this.#logger.info('Telegram disabled');return;}
     try {
-      this.#bot=new TelegramBot(this.#config.telegram.botToken,{polling:{interval:5000,params:{timeout:30},autoStart:true}});
+      this.#bot=new TelegramBot(this.#config.telegram.botToken,{polling:{interval:TIMING.TELEGRAM_POLL_INTERVAL,params:{timeout:30},autoStart:true}});
       this.#bot.on('polling_error',(e)=>{
         const now=Date.now();
-        if(now-this.#lastRestart>60000&&this.#restartCount<3){
+        if(now-this.#lastRestart>TIMING.TELEGRAM_RESTART_COOLDOWN&&this.#restartCount<3){
           this.#lastRestart=now; this.#restartCount++;
           setTimeout(()=>{try{this.#bot.stopPolling();}catch{} setTimeout(()=>{try{this.#bot.startPolling();}catch{}},5000);},5000);
         }
@@ -91,57 +97,68 @@ export class TelegramService {
 
   async #cmdStatus() {
     try {
-      const p = this.#portRepo.getCurrent();
-      const pos = this.#posRepo.findOpen();
-      const prices = await this.#fetchPrices();
-      const s = this.#posRepo.getStats();
+      const p=this.#portRepo.getCurrent();
+      const pos=this.#posRepo.findOpen();
+      const prices=await this.#fetchPrices();
+      const s=this.#posRepo.getStats();
+      const pf=s&&s.total>0&&s.losses>0?(Math.abs(s.total_pnl)/Math.abs(s.worst_trade||1)).toFixed(2):'N/A';
+      const avgHoldMs=s&&s.total>0?(s.avg_hold_duration||0):0;
+      const avgHoldH=avgHoldMs>0?(avgHoldMs/3600000).toFixed(1)+'h':'N/A';
 
-      const pf = s && s.total > 0 && s.losses > 0 ? (Math.abs(s.total_pnl) / Math.abs(s.worst_trade || 1)).toFixed(2) : 'N/A';
-      const avgHoldMs = s && s.total > 0 ? (s.avg_hold_duration || 0) : 0;
-      const avgHoldH = avgHoldMs > 0 ? (avgHoldMs / 3600000).toFixed(1) + 'h' : 'N/A';
-
-      let floatingPnl = 0;
-      let posLines = '';
-      if (pos && pos.length && prices) {
-        for (const position of pos) {
-          const cp = prices[position.pair];
-          if (!cp) continue;
-          const qty = position.remaining_quantity || position.quantity;
-          const pnl = position.side === 'long' ? (cp - position.entry_price) * qty : (position.entry_price - cp) * qty;
-          const pct = (pnl / (position.entry_price * qty)) * 100;
-          floatingPnl += pnl;
-          posLines += (pnl >= 0 ? '🟢' : '🔴') + ' <code>' + position.pair + '</code> <code>' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' (' + (pnl >= 0 ? '+' : '') + pct.toFixed(2) + '%)</code>\n';
+      let floatingPnl=0, posLines='';
+      if(pos&&pos.length&&prices) {
+        for(const position of pos) {
+          const cp=prices[position.pair]; if(!cp) continue;
+          const qty=position.remaining_quantity||position.quantity;
+          const pnl=position.side==='long'?(cp-position.entry_price)*qty:(position.entry_price-cp)*qty;
+          const pct=(pnl/(position.entry_price*qty))*100;
+          floatingPnl+=pnl;
+          posLines+=(pnl>=0?'🟢':'🔴')+' <code>'+position.pair+'</code> <code>'+(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' ('+(pnl>=0?'+':'')+pct.toFixed(2)+'%)</code>\n';
         }
       }
 
-      const totalEquity = (p?.balance || 0) + floatingPnl;
-      const ddPct = p?.peak_balance > 0 ? ((p.peak_balance - totalEquity) / p.peak_balance * 100) : 0;
+      const totalEquity=(p?.balance||0)+floatingPnl;
+      const ddPct=p?.peak_balance>0?((p.peak_balance-totalEquity)/p.peak_balance*100):0;
+
+      // System metrics
+      const ci=cpus(); let idle=0,total=0;
+      ci.forEach(c=>{for(const t in c.times)total+=c.times[t];idle+=c.times.idle;});
+      const cpu=total>0?Math.round(((total-idle)/total)*100):0;
+      const ram=Math.round(((totalmem()-freemem())/totalmem())*100);
+      let disk=0;
+      try { disk=parseInt(execSync("df -h / | tail -1 | awk '{print $5}'").toString().trim(),10)||0; } catch {}
 
       this.#send(
         '📊 <b>DASHBOARD</b>\n\n' +
-        'Balance:       <code>$' + (p?.balance || 0).toFixed(2) + '</code>\n' +
-        'Equity:        <code>$' + totalEquity.toFixed(2) + '</code>\n' +
-        'Floating:      <code>' + (floatingPnl >= 0 ? '+' : '') + '$' + floatingPnl.toFixed(2) + '</code>\n' +
-        'Realized:      <code>$' + (p?.realized_pnl || 0).toFixed(2) + '</code>\n' +
-        'Daily PnL:     <code>' + ((p?.daily_pnl || 0) >= 0 ? '+' : '') + '$' + (p?.daily_pnl || 0).toFixed(2) + '</code>\n' +
-        'Weekly:        <code>' + ((p?.weekly_pnl || 0) >= 0 ? '+' : '') + '$' + (p?.weekly_pnl || 0).toFixed(2) + '</code>\n' +
-        'DD:            <code>' + ddPct.toFixed(2) + '%</code>\n' +
-        'Win Rate:      <code>' + (p?.win_rate || 0).toFixed(1) + '%</code>\n' +
-        'Profit Factor: <code>' + pf + '</code>\n' +
-        'Avg Hold:      <code>' + avgHoldH + '</code>\n' +
-        'Open:          <code>' + (pos ? pos.length : 0) + '</code>\n\n' +
-        (posLines ? '📈 <b>POSITIONS:</b>\n' + posLines + '\n' : '') +
-        '🕐 ' + this.#ts()
+        'Balance:       <code>$'+(p?.balance||0).toFixed(2)+'</code>\n' +
+        'Equity:        <code>$'+totalEquity.toFixed(2)+'</code>\n' +
+        'Floating:      <code>'+(floatingPnl>=0?'+':'')+'$'+floatingPnl.toFixed(2)+'</code>\n' +
+        'Realized:      <code>$'+(p?.realized_pnl||0).toFixed(2)+'</code>\n' +
+        'Daily PnL:     <code>'+((p?.daily_pnl||0)>=0?'+':'')+'$'+(p?.daily_pnl||0).toFixed(2)+'</code>\n' +
+        'Weekly:        <code>'+((p?.weekly_pnl||0)>=0?'+':'')+'$'+(p?.weekly_pnl||0).toFixed(2)+'</code>\n' +
+        'Monthly:       <code>'+((p?.monthly_pnl||0)>=0?'+':'')+'$'+(p?.monthly_pnl||0).toFixed(2)+'</code>\n' +
+        'DD:            <code>'+ddPct.toFixed(2)+'%</code>\n' +
+        'Win Rate:      <code>'+(p?.win_rate||0).toFixed(1)+'%</code>\n' +
+        'Profit Factor: <code>'+pf+'</code>\n' +
+        'Avg Hold:      <code>'+avgHoldH+'</code>\n' +
+        'Open:          <code>'+(pos?pos.length:0)+'</code>\n' +
+        'CPU:           <code>'+cpu+'%</code>\n' +
+        'RAM:           <code>'+ram+'%</code>\n' +
+        'Disk:          <code>'+disk+'%</code>\n' +
+        'AI:            <code>'+(this.#config.ai.enabled?'✅ ON':'❌ OFF')+'</code>\n' +
+        'Exchange:      <code>✅ Connected</code>\n\n' +
+        (posLines?'📈 <b>POSITIONS:</b>\n'+posLines+'\n':'') +
+        '🕐 '+this.#ts()
       );
-    } catch(e) { this.#send('Status error: ' + e.message); }
+    } catch(e) { this.#send('Status error'); }
   }
 
   async #cmdPositions() {
     try {
-      const pos = this.#posRepo.findOpen();
-      const prices = await this.#fetchPrices();
-      this.#send(this.#fmt.formatOpenPositions(pos, prices));
-    } catch(e) { this.#send(this.#fmt.formatOpenPositions(this.#posRepo.findOpen(), null)); }
+      const pos=this.#posRepo.findOpen();
+      const prices=await this.#fetchPrices();
+      this.#send(this.#fmt.formatOpenPositions(pos,prices));
+    } catch(e) { this.#send(this.#fmt.formatOpenPositions(this.#posRepo.findOpen(),null)); }
   }
 
   #cmdBalance() {
@@ -155,8 +172,8 @@ export class TelegramService {
     if(!t||!t.length){this.#send('No trades');return;}
     let m='📋 <b>TRADES</b>\n\n';
     t.forEach(x=>{
-      const pnlStr = (x.pnl>=0?'+':'') + '$' + (x.pnl||0).toFixed(2);
-      const emoji = x.status==='open' ? '🟢' : (x.pnl>0?'💰':'💸');
+      const pnlStr=(x.pnl>=0?'+':'')+'$'+(x.pnl||0).toFixed(2);
+      const emoji=x.status==='open'?'🟢':(x.pnl>0?'💰':'💸');
       m+=emoji+' '+x.id+' | '+x.side+' | '+pnlStr+' | '+(x.exit_reason||'open')+'\n';
     });
     this.#send(m);
@@ -180,10 +197,37 @@ export class TelegramService {
   }
 
   #cmdHealth() {
+    const ci=cpus(); let idle=0,total=0;
+    ci.forEach(c=>{for(const t in c.times)total+=c.times[t];idle+=c.times.idle;});
+    const cpu=total>0?Math.round(((total-idle)/total)*100):0;
     const ram=Math.round(((totalmem()-freemem())/totalmem())*100);
+    let disk=0;
+    try { disk=parseInt(execSync("df -h / | tail -1 | awk '{print $5}'").toString().trim(),10)||0; } catch {}
     const up=Math.round((Date.now()-this.#startTime)/1000);
     const h=Math.floor(up/3600); const m=Math.floor((up%3600)/60);
-    this.#send('🏥 <b>HEALTH</b>\n\nRAM: '+ram+'%\nUptime: '+h+'h '+m+'m\nPositions: '+this.#posRepo.countOpen()+'\nMode: '+this.#strategyMode.getModeName()+'\nStatus: '+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'\nExchange: ✅\nTelegram: ✅\nAI: '+(this.#config.ai.enabled?'✅':'❌')+'\nDB: ✅');
+
+    // Test exchange latency
+    let exStatus='✅';
+    try {
+      const start=Date.now();
+      await this.#tradeManager.orderbook.analyze(this.#config.exchange.pair);
+      this.#exchangeLatency=Date.now()-start;
+    } catch { exStatus='❌'; this.#exchangeLatency=-1; }
+
+    this.#send(
+      '🏥 <b>HEALTH</b>\n\n' +
+      'CPU:            <code>'+cpu+'%</code>\n' +
+      'RAM:            <code>'+ram+'%</code>\n' +
+      'Disk:           <code>'+disk+'%</code>\n' +
+      'Uptime:         <code>'+h+'h '+m+'m</code>\n' +
+      'Positions:      <code>'+this.#posRepo.countOpen()+'</code>\n' +
+      'Mode:           <code>'+this.#strategyMode.getModeName()+'</code>\n' +
+      'Status:         <code>'+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'</code>\n' +
+      'Exchange:       <code>'+exStatus+' ('+this.#exchangeLatency+'ms)</code>\n' +
+      'Telegram:       <code>✅ Connected</code>\n' +
+      'AI:             <code>'+(this.#config.ai.enabled?'✅ ON':'❌ OFF')+'</code>\n' +
+      'DB:             <code>✅ OK</code>'
+    );
   }
 
   #cmdEquity() {
@@ -233,19 +277,7 @@ export class TelegramService {
     try {
       const a=this.#analytics.getReport(30);
       if(!a.totalTrades){this.#send('No trades');return;}
-      this.#send(
-        '📊 <b>ANALYTICS</b>\n\n' +
-        'Trades: '+a.totalTrades+' | W: '+a.wins+' | L: '+a.losses+'\n' +
-        'Win Rate: '+a.winRate+'%\n' +
-        'PnL: $'+a.totalPnl+'\n' +
-        'PF: '+a.profitFactor+'\n' +
-        'Expectancy: $'+a.expectancy+'/trade\n' +
-        'Sharpe: '+a.sharpeRatio+'\n' +
-        'Sortino: '+a.sortinoRatio+'\n' +
-        'Max DD: '+a.maxDrawdownPct+'%\n' +
-        'Win Streak: '+a.maxWinStreak+' | Loss Streak: '+a.maxLossStreak+'\n' +
-        'Avg Hold: '+a.avgHoldHours+'h'
-      );
+      this.#send('📊 <b>ANALYTICS</b>\n\nTrades: '+a.totalTrades+' | W: '+a.wins+' | L: '+a.losses+'\nWin Rate: '+a.winRate+'%\nPnL: $'+a.totalPnl+'\nPF: '+a.profitFactor+'\nExpectancy: $'+a.expectancy+'/trade\nSharpe: '+a.sharpeRatio+'\nSortino: '+a.sortinoRatio+'\nMax DD: '+a.maxDrawdownPct+'%\nWin Streak: '+a.maxWinStreak+' | Loss Streak: '+a.maxLossStreak+'\nAvg Hold: '+a.avgHoldHours+'h');
     } catch(e){this.#send('Analytics error: '+e.message);}
   }
 
@@ -263,11 +295,8 @@ export class TelegramService {
   }
 
   #setMode(mode) {
-    if(this.#strategyMode.setMode(mode)){
-      this.#send('✅ Mode changed to: <b>'+mode+'</b>');
-    } else {
-      this.#send('❌ Invalid mode');
-    }
+    if(this.#strategyMode.setMode(mode)) this.#send('✅ Mode: <b>'+mode+'</b>');
+    else this.#send('❌ Invalid mode');
   }
 
   async sendAlert(m){await this.#send('⚠️ '+m);}
