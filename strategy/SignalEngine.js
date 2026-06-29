@@ -7,8 +7,11 @@ import { TrendFilter } from './TrendFilter.js';
 import { SIDE } from '../utils/constants.js';
 
 export class SignalEngine {
-  #config; #logger; #marketData;
-  constructor(config, logger, marketData) { this.#config=config; this.#logger=logger; this.#marketData=marketData; }
+  #config; #logger; #marketData; #strategyMode;
+  constructor(config, logger, marketData, strategyMode) {
+    this.#config=config; this.#logger=logger; this.#marketData=marketData;
+    this.#strategyMode=strategyMode;
+  }
 
   async analyze(pair) {
     const targetPair = pair || this.#config.exchange.pair;
@@ -22,7 +25,11 @@ export class SignalEngine {
       if(!TrendFilter.checkAlignment(ps.trend,ss.trend,ts.trend)) return {pair:targetPair,side:'neutral',confidence:0,reason:'Not aligned'};
       const side=mtf>0?SIDE.LONG:SIDE.SHORT;
       const confidence=Math.min(Math.abs(mtf),100);
-      if(confidence<this.#config.indicators.confidenceThreshold) return {pair:targetPair,side:'neutral',confidence,reason:'Below threshold'};
+
+      // FIX: Use StrategyMode confidence threshold instead of config
+      const threshold = this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : this.#config.indicators.confidenceThreshold;
+
+      if(confidence<threshold) return {pair:targetPair,side:'neutral',confidence,reason:'Below threshold ('+threshold+'%)'};
       return {pair:targetPair,side,confidence,reason:'Signal generated',indicators:{primary:ps,secondary:ss,tertiary:ts}};
     } catch(e) { this.#logger.error('Signal '+targetPair+': '+e.message); return {pair:targetPair,side:'neutral',confidence:0,reason:e.message}; }
   }
