@@ -87,7 +87,6 @@ class App {
     const reportService = new ReportService(config, logger, database, telegram);
     this.#container.register('reportService', reportService);
 
-    // FIX: Pass aiValidator to HealthMonitor
     const healthMonitor = new HealthMonitor(config, logger, telegram, database, exchange, aiValidator);
     this.#container.register('healthMonitor', healthMonitor);
 

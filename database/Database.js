@@ -3,37 +3,51 @@ import { join } from 'path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { runMigrations } from './migrations/init.js';
 
+/**
+ * SQLite database using sql.js.
+ * FIX: Batch save instead of saving on every write.
+ */
 export class Database {
   #config; #logger; #db = null; #dbPath;
-  constructor(config, logger) { this.#config = config; this.#logger = logger; }
+  #dirty = false; #saveInterval = null;
+
+  constructor(config, logger) {
+    this.#config = config;
+    this.#logger = logger;
+  }
 
   async initialize() {
-    console.log('[DB] Starting initialization...');
     const dir = join(process.cwd(), 'storage');
-    if (!existsSync(dir)) { mkdirSync(dir, { recursive: true }); console.log('[DB] Created storage dir'); }
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     this.#dbPath = join(dir, 'agent.db');
-    console.log('[DB] Path:', this.#dbPath);
-    console.log('[DB] Loading sql.js...');
     const SQL = await initSqlJs();
-    console.log('[DB] sql.js loaded');
+
     if (existsSync(this.#dbPath)) {
       const buf = readFileSync(this.#dbPath);
       this.#db = new SQL.Database(buf);
-      console.log('[DB] Existing DB loaded');
     } else {
       this.#db = new SQL.Database();
-      console.log('[DB] New DB created');
     }
+
     this.#db.run('PRAGMA foreign_keys = ON');
-    console.log('[DB] Running migrations...');
     runMigrations(this, this.#logger);
-    console.log('[DB] Migrations done');
-    this.#save();
-    console.log('[DB] Saved');
+
+    // FIX: Save every 10 seconds instead of every write
+    this.#saveInterval = setInterval(() => {
+      if (this.#dirty) {
+        this.#saveNow();
+        this.#dirty = false;
+      }
+    }, 10000);
+
+    this.#saveNow();
     this.#logger.info('Database initialized');
   }
 
-  get db() { if (!this.#db) throw new Error('DB not initialized'); return this.#db; }
+  get db() {
+    if (!this.#db) throw new Error('Database not initialized');
+    return this.#db;
+  }
 
   prepare(sql) {
     const self = this;
@@ -44,35 +58,51 @@ export class Database {
           if (p.length) s.bind(p);
           if (s.step()) { const r = s.getAsObject(); s.free(); return r; }
           s.free(); return undefined;
-        } catch(e) { return undefined; }
+        } catch (e) { return undefined; }
       },
       all(...p) {
         try {
-          const r = []; const s = self.db.prepare(sql);
+          const r = [];
+          const s = self.db.prepare(sql);
           if (p.length) s.bind(p);
           while (s.step()) r.push(s.getAsObject());
           s.free(); return r;
-        } catch(e) { return []; }
+        } catch (e) { return []; }
       },
       run(...p) {
         try {
-          self.db.run(sql, p); self.#save();
+          self.db.run(sql, p);
+          self.#dirty = true; // Mark dirty instead of immediate save
           return { changes: self.db.getRowsModified() };
-        } catch(e) { return { changes: 0 }; }
-      }
+        } catch (e) { return { changes: 0 }; }
+      },
     };
   }
 
-  exec(sql) { this.db.run(sql); this.#save(); }
+  exec(sql) {
+    this.db.run(sql);
+    this.#dirty = true;
+  }
 
-  #save() {
+  #saveNow() {
     try {
       const d = this.db.export();
       writeFileSync(this.#dbPath, Buffer.from(d));
-    } catch(e) { console.error('[DB] Save error:', e.message); }
+    } catch (e) {
+      this.#logger?.error('DB save error:', e.message);
+    }
   }
 
   async close() {
-    if (this.#db) { this.#save(); this.#db.close(); this.#db = null; console.log('[DB] Closed'); }
+    if (this.#saveInterval) {
+      clearInterval(this.#saveInterval);
+      this.#saveInterval = null;
+    }
+    if (this.#db) {
+      this.#saveNow();
+      this.#db.close();
+      this.#db = null;
+      this.#logger.info('Database closed');
+    }
   }
 }
