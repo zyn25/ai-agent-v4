@@ -14,8 +14,8 @@ import { TelegramService } from './telegram/TelegramService.js';
 import { AIValidator } from './ai/AIValidator.js';
 import { ReportService } from './reports/ReportService.js';
 import { HealthMonitor } from './monitor/HealthMonitor.js';
-import { WebDashboard } from './monitor/WebDashboard.js';
 import { BackupManager } from './database/BackupManager.js';
+import { StrategyMode } from './strategy/StrategyMode.js';
 import { join } from 'path';
 
 class App {
@@ -75,10 +75,13 @@ class App {
     const aiValidator = new AIValidator(config, logger);
     this.#container.register('aiValidator', aiValidator);
 
+    const strategyMode = new StrategyMode(logger, database);
+    this.#container.register('strategyMode', strategyMode);
+
     const tradeManager = new TradeManager(config, logger, database, exchange, signalEngine, riskEngine, aiValidator, eventBus);
     this.#container.register('tradeManager', tradeManager);
 
-    const telegram = new TelegramService(config, logger, eventBus, tradeManager, database);
+    const telegram = new TelegramService(config, logger, eventBus, tradeManager, database, strategyMode);
     this.#container.register('telegram', telegram);
 
     const reportService = new ReportService(config, logger, database, telegram);
@@ -86,9 +89,6 @@ class App {
 
     const healthMonitor = new HealthMonitor(config, logger, telegram, database, exchange);
     this.#container.register('healthMonitor', healthMonitor);
-
-    const webDashboard = new WebDashboard(config, logger, database, tradeManager);
-    this.#container.register('webDashboard', webDashboard);
 
     const backupManager = new BackupManager(join(process.cwd(), 'storage', 'agent.db'), logger);
     this.#container.register('backupManager', backupManager);
@@ -110,9 +110,6 @@ class App {
     const healthMonitor = this.#container.resolve('healthMonitor');
     healthMonitor.start();
 
-    const webDashboard = this.#container.resolve('webDashboard');
-    webDashboard.start();
-
     const backupManager = this.#container.resolve('backupManager');
     backupManager.start();
   }
@@ -126,7 +123,6 @@ class App {
         this.#container.resolve('tradeManager').shutdown();
         this.#container.resolve('reportService').stop();
         this.#container.resolve('healthMonitor').stop();
-        this.#container.resolve('webDashboard').stop();
         this.#container.resolve('backupManager').stop();
         await this.#container.resolve('database').close();
         this.#logger.info('Shutdown complete');
