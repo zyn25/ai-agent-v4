@@ -10,7 +10,7 @@ import { totalmem, freemem } from 'os';
 export class TelegramService {
   #config; #logger; #eventBus; #tradeManager; #bot=null; #fmt; #chatId;
   #portRepo; #posRepo; #db; #sizer; #journal; #analytics; #strategyMode;
-  #lastRestart=0; #restartCount=0;
+  #lastRestart=0; #restartCount=0; #startTime;
 
   constructor(c,l,eb,tm,db,strategyMode) {
     this.#config=c; this.#logger=l; this.#eventBus=eb; this.#tradeManager=tm;
@@ -18,7 +18,7 @@ export class TelegramService {
     this.#portRepo=new PortfolioRepository(db); this.#posRepo=new PositionRepository(db);
     this.#db=db; this.#sizer=new PositionSizer(c);
     this.#journal=new TradeJournal(db,l); this.#analytics=new PerformanceAnalytics(db,l);
-    this.#strategyMode=strategyMode;
+    this.#strategyMode=strategyMode; this.#startTime=Date.now();
   }
 
   async initialize() {
@@ -40,16 +40,7 @@ export class TelegramService {
 
   async #fetchPrices() {
     const prices = {};
-    const pairs = this.#config.pairs;
-    for (const pair of pairs) {
-      try {
-        const ticker = await this.#tradeManager.orderbook?.analyze?.constructor ? null : null;
-        // Use exchange directly
-        const exchange = this.#tradeManager.orderbook ? null : null;
-      } catch {}
-    }
-    // Fetch from orderbook analyzer
-    for (const pair of pairs) {
+    for (const pair of this.#config.pairs) {
       try {
         const ob = await this.#tradeManager.orderbook.analyze(pair);
         if (ob && ob.midPrice) prices[pair] = ob.midPrice;
@@ -95,12 +86,7 @@ export class TelegramService {
   }
 
   #helpText() {
-    return '📋 <b>COMMANDS</b>\n\n' +
-      '📊 <b>Info:</b>\n/status /positions /balance /trades /stats /equity\n\n' +
-      '📈 <b>Analysis:</b>\n/orderbook /kelly /summary /analytics /journal\n\n' +
-      '⚙️ <b>Settings:</b>\n/config /risk /health /mode\n\n' +
-      '🎯 <b>Strategy:</b>\n/aggressive /balanced /conservative /scalping\n\n' +
-      '🚨 <b>Emergency:</b>\n/pause /resume /closeall /closelast';
+    return '📋 <b>COMMANDS</b>\n\n📊 <b>Info:</b>\n/status /positions /balance /trades /stats /equity\n\n📈 <b>Analysis:</b>\n/orderbook /kelly /summary /analytics /journal\n\n⚙️ <b>Settings:</b>\n/config /risk /health /mode\n\n🎯 <b>Strategy:</b>\n/aggressive /balanced /conservative /scalping\n\n🚨 <b>Emergency:</b>\n/pause /resume /closeall /closelast';
   }
 
   async #cmdStatus() {
@@ -108,12 +94,45 @@ export class TelegramService {
       const p = this.#portRepo.getCurrent();
       const pos = this.#posRepo.findOpen();
       const prices = await this.#fetchPrices();
-      this.#send(this.#fmt.formatDashboard(p, pos, prices));
-    } catch(e) {
-      const p = this.#portRepo.getCurrent();
-      const pos = this.#posRepo.findOpen();
-      this.#send(this.#fmt.formatDashboard(p, pos, null));
-    }
+      const s = this.#posRepo.getStats();
+      const pf = s && s.losses > 0 && s.total_pnl ? (Math.abs(s.total_pnl) / Math.abs(s.worst_trade || 1)).toFixed(2) : 'N/A';
+      const avgHold = s && s.total > 0 ? (s.avg_hold_duration / 3600000).toFixed(1) + 'h' : 'N/A';
+      const t = this.#ts();
+
+      let floatingPnl = 0;
+      let posLines = '';
+      if (pos && pos.length && prices) {
+        for (const position of pos) {
+          const cp = prices[position.pair];
+          if (!cp) continue;
+          const qty = position.remaining_quantity || position.quantity;
+          const pnl = position.side === 'long' ? (cp - position.entry_price) * qty : (position.entry_price - cp) * qty;
+          const pct = (pnl / (position.entry_price * qty)) * 100;
+          floatingPnl += pnl;
+          posLines += (pnl >= 0 ? '🟢' : '🔴') + ' <code>' + position.pair + '</code> <code>' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + ' (' + (pnl >= 0 ? '+' : '') + pct.toFixed(2) + '%)</code>\n';
+        }
+      }
+
+      const totalEquity = (p?.balance || 0) + floatingPnl;
+      const ddPct = p?.peak_balance > 0 ? ((p.peak_balance - totalEquity) / p.peak_balance * 100) : 0;
+
+      this.#send(
+        '📊 <b>DASHBOARD</b>\n\n' +
+        'Balance:      <code>$' + (p?.balance || 0).toFixed(2) + '</code>\n' +
+        'Equity:       <code>$' + totalEquity.toFixed(2) + '</code>\n' +
+        'Floating:     <code>' + (floatingPnl >= 0 ? '+' : '') + '$' + floatingPnl.toFixed(2) + '</code>\n' +
+        'Realized:     <code>$' + (p?.realized_pnl || 0).toFixed(2) + '</code>\n' +
+        'Daily PnL:    <code>' + ((p?.daily_pnl || 0) >= 0 ? '+' : '') + '$' + (p?.daily_pnl || 0).toFixed(2) + '</code>\n' +
+        'Weekly:       <code>' + ((p?.weekly_pnl || 0) >= 0 ? '+' : '') + '$' + (p?.weekly_pnl || 0).toFixed(2) + '</code>\n' +
+        'DD:           <code>' + ddPct.toFixed(2) + '%</code>\n' +
+        'Win Rate:     <code>' + (p?.win_rate || 0).toFixed(1) + '%</code>\n' +
+        'Profit Factor:<code>' + pf + '</code>\n' +
+        'Avg Hold:     <code>' + avgHold + '</code>\n' +
+        'Open:         <code>' + (pos ? pos.length : 0) + '</code>\n\n' +
+        (posLines ? '📈 <b>POSITIONS:</b>\n' + posLines + '\n' : '') +
+        '🕐 ' + t
+      );
+    } catch(e) { this.#send('Status error'); }
   }
 
   async #cmdPositions() {
@@ -121,10 +140,7 @@ export class TelegramService {
       const pos = this.#posRepo.findOpen();
       const prices = await this.#fetchPrices();
       this.#send(this.#fmt.formatOpenPositions(pos, prices));
-    } catch(e) {
-      const pos = this.#posRepo.findOpen();
-      this.#send(this.#fmt.formatOpenPositions(pos, null));
-    }
+    } catch(e) { this.#send(this.#fmt.formatOpenPositions(this.#posRepo.findOpen(), null)); }
   }
 
   #cmdBalance() {
@@ -160,9 +176,21 @@ export class TelegramService {
 
   #cmdHealth() {
     const ram=Math.round(((totalmem()-freemem())/totalmem())*100);
-    const up=Math.round(process.uptime());
+    const up=Math.round((Date.now()-this.#startTime)/1000);
     const h=Math.floor(up/3600); const m=Math.floor((up%3600)/60);
-    this.#send('🏥 <b>HEALTH</b>\n\nRAM: '+ram+'%\nUptime: '+h+'h '+m+'m\nPositions: '+this.#posRepo.countOpen()+'\nMode: '+this.#strategyMode.getModeName()+'\nStatus: '+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'\nDB: ✅\nExchange: ✅');
+    const p=this.#posRepo.getStats();
+    this.#send(
+      '🏥 <b>HEALTH</b>\n\n' +
+      'RAM: '+ram+'%\n' +
+      'Uptime: '+h+'h '+m+'m\n' +
+      'Positions: '+this.#posRepo.countOpen()+'\n' +
+      'Mode: '+this.#strategyMode.getModeName()+'\n' +
+      'Status: '+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'\n' +
+      'Exchange: ✅\n' +
+      'Telegram: ✅\n' +
+      'AI: '+(this.#config.ai.enabled?'✅':'❌')+'\n' +
+      'DB: ✅'
+    );
   }
 
   #cmdEquity() {
@@ -212,20 +240,7 @@ export class TelegramService {
     try {
       const a=this.#analytics.getReport(30);
       if(!a.totalTrades){this.#send('No trades');return;}
-      this.#send(
-        '📊 <b>ANALYTICS (30D)</b>\n\n' +
-        'Trades: '+a.totalTrades+' | W: '+a.wins+' | L: '+a.losses+'\n' +
-        'Win Rate: '+a.winRate+'%\n' +
-        'PnL: $'+a.totalPnl+'\n' +
-        'PF: '+a.profitFactor+'\n' +
-        'Expectancy: $'+a.expectancy+'/trade\n' +
-        'Sharpe: '+a.sharpeRatio+'\n' +
-        'Sortino: '+a.sortinoRatio+'\n' +
-        'Max DD: '+a.maxDrawdownPct+'%\n' +
-        'Win Streak: '+a.maxWinStreak+' | Loss Streak: '+a.maxLossStreak+'\n' +
-        'Best Hour: '+a.bestHour+'\n' +
-        'Avg Hold: '+a.avgHoldHours+'h'
-      );
+      this.#send('📊 <b>ANALYTICS (30D)</b>\n\nTrades: '+a.totalTrades+' | W: '+a.wins+' | L: '+a.losses+'\nWin Rate: '+a.winRate+'%\nPnL: $'+a.totalPnl+'\nPF: '+a.profitFactor+'\nExpectancy: $'+a.expectancy+'/trade\nSharpe: '+a.sharpeRatio+'\nSortino: '+a.sortinoRatio+'\nMax DD: '+a.maxDrawdownPct+'%\nWin Streak: '+a.maxWinStreak+' | Loss Streak: '+a.maxLossStreak+'\nBest Hour: '+a.bestHour+'\nAvg Hold: '+a.avgHoldHours+'h');
     } catch(e){this.#send('Analytics error: '+e.message);}
   }
 
@@ -252,5 +267,6 @@ export class TelegramService {
 
   async sendAlert(m){await this.#send('⚠️ '+m);}
   async sendReport(m){await this.#send(m);}
+  #ts(){return new Date().toISOString().replace('T',' ').substring(0,19);}
   async #send(t){if(!this.#bot||!this.#chatId)return;try{await this.#bot.sendMessage(this.#chatId,t,{parse_mode:'HTML'});}catch(e){this.#logger.error('TG send:',e.message);}}
 }

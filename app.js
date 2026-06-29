@@ -66,11 +66,9 @@ class App {
     const marketData = new MarketDataService(exchange, config, logger);
     this.#container.register('marketData', marketData);
 
-    // FIX: Create StrategyMode BEFORE SignalEngine and TradeManager
     const strategyMode = new StrategyMode(logger, database);
     this.#container.register('strategyMode', strategyMode);
 
-    // FIX: Pass strategyMode to SignalEngine
     const signalEngine = new SignalEngine(config, logger, marketData, strategyMode);
     this.#container.register('signalEngine', signalEngine);
 
@@ -80,7 +78,6 @@ class App {
     const aiValidator = new AIValidator(config, logger);
     this.#container.register('aiValidator', aiValidator);
 
-    // FIX: Pass strategyMode to TradeManager
     const tradeManager = new TradeManager(config, logger, database, exchange, signalEngine, riskEngine, aiValidator, eventBus, strategyMode);
     this.#container.register('tradeManager', tradeManager);
 
@@ -90,7 +87,8 @@ class App {
     const reportService = new ReportService(config, logger, database, telegram);
     this.#container.register('reportService', reportService);
 
-    const healthMonitor = new HealthMonitor(config, logger, telegram, database, exchange);
+    // FIX: Pass aiValidator to HealthMonitor
+    const healthMonitor = new HealthMonitor(config, logger, telegram, database, exchange, aiValidator);
     this.#container.register('healthMonitor', healthMonitor);
 
     const backupManager = new BackupManager(join(process.cwd(), 'storage', 'agent.db'), logger);
