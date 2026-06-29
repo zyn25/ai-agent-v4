@@ -19,18 +19,28 @@ export class SignalEngine {
       const {primary,secondary,tertiary}=this.#config.timeframes;
       const [pd,sd,td]=await Promise.all([this.#fetch(targetPair,primary),this.#fetch(targetPair,secondary),this.#fetch(targetPair,tertiary)]);
       if(!pd||!sd||!td) return {pair:targetPair,side:'neutral',confidence:0,reason:'Data fetch failed'};
-      const ps=this.#calc(pd,50),ss=this.#calc(sd,30),ts=this.#calc(td,20);
+      
+      const ps=this.#calc(pd,50);
+      const ss=this.#calc(sd,30);
+      const ts=this.#calc(td,20);
+      
       if(!ps||!ss||!ts) return {pair:targetPair,side:'neutral',confidence:0,reason:'Calc failed'};
+      
       const mtf=ps.score+ss.score+ts.score;
-      if(!TrendFilter.checkAlignment(ps.trend,ss.trend,ts.trend)) return {pair:targetPair,side:'neutral',confidence:0,reason:'Not aligned'};
+      const aligned=TrendFilter.checkAlignment(ps.trend,ss.trend,ts.trend);
+      
+      // DEBUG: Log detailed signal info
+      const threshold = this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : this.#config.indicators.confidenceThreshold;
+      this.#logger.trade('SIGNAL_DEBUG: '+targetPair+' | '+primary+':'+ps.trend+'('+ps.score.toFixed(1)+') | '+secondary+':'+ss.trend+'('+ss.score.toFixed(1)+') | '+tertiary+':'+ts.trend+'('+ts.score.toFixed(1)+') | MTF:'+mtf.toFixed(1)+' | Aligned:'+aligned+' | Threshold:'+threshold);
+      
+      if(!aligned) return {pair:targetPair,side:'neutral',confidence:0,reason:'Not aligned ('+ps.trend+'/'+ss.trend+'/'+ts.trend+')'};
+      
       const side=mtf>0?SIDE.LONG:SIDE.SHORT;
       const confidence=Math.min(Math.abs(mtf),100);
-
-      // FIX: Use StrategyMode confidence threshold instead of config
-      const threshold = this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : this.#config.indicators.confidenceThreshold;
-
-      if(confidence<threshold) return {pair:targetPair,side:'neutral',confidence,reason:'Below threshold ('+threshold+'%)'};
-      return {pair:targetPair,side,confidence,reason:'Signal generated',indicators:{primary:ps,secondary:ss,tertiary:ts}};
+      
+      if(confidence<threshold) return {pair:targetPair,side:'neutral',confidence,reason:'Below threshold ('+threshold+'%, got '+confidence.toFixed(1)+'%)'};
+      
+      return {pair:targetPair,side,confidence:Math.round(confidence),reason:'Signal generated',indicators:{primary:ps,secondary:ss,tertiary:ts}};
     } catch(e) { this.#logger.error('Signal '+targetPair+': '+e.message); return {pair:targetPair,side:'neutral',confidence:0,reason:e.message}; }
   }
 
@@ -55,22 +65,45 @@ export class SignalEngine {
     try {
       const {closes,highs,lows,volumes}=d;
       const ind=this.#config.indicators;
-      const ef=EMAIndicator.calculate(closes,ind.emaFast),es=EMAIndicator.calculate(closes,ind.emaSlow);
+      
+      const ef=EMAIndicator.calculate(closes,ind.emaFast);
+      const es=EMAIndicator.calculate(closes,ind.emaSlow);
       if(!ef.length||!es.length) return null;
       const ec=EMAIndicator.crossover(ef,es);
+      
       const rv=RSIIndicator.calculate(closes,ind.rsiPeriod);
       if(!rv.length) return null;
-      const ri=RSIIndicator.interpret(rv[rv.length-1],ind.rsiOverbought,ind.rsiOversold);
+      const rsiVal=rv[rv.length-1];
+      const ri=RSIIndicator.interpret(rsiVal,ind.rsiOverbought,ind.rsiOversold);
+      
       const mc=MACDIndicator.calculate(closes,ind.macdFast,ind.macdSlow,ind.macdSignal);
+      const hist = mc.histogram ? mc.histogram[mc.histogram.length-1] : null;
       const mi=mc.histogram?MACDIndicator.interpret(mc.MACD,mc.signal,mc.histogram):'neutral';
+      
       const av=ATRIndicator.calculate(highs,lows,closes,ind.atrPeriod);
-      const vd=VolumeIndicator.calculate(volumes),vi=VolumeIndicator.interpret(vd.ratio);
+      const vd=VolumeIndicator.calculate(volumes);
+      const vi=VolumeIndicator.interpret(vd.ratio);
+      
       let score=0;
       if(ec==='bullish'||ec==='above')score+=w*0.3;else if(ec==='bearish'||ec==='below')score-=w*0.3;
       if(ri==='bullish')score+=w*0.2;else if(ri==='bearish')score-=w*0.2;
       if(mi.includes('bullish'))score+=w*0.25;else if(mi.includes('bearish'))score-=w*0.25;
       if(vi==='high'||vi==='very_high')score*=1.1;else if(vi==='low')score*=0.7;
-      return {score,trend:score>0?'bullish':score<0?'bearish':'neutral',weight:w,indicators:{ema:{fast:ef[ef.length-1],slow:es[es.length-1],cross:ec},rsi:{value:rv[rv.length-1],interpret:ri},macd:{interpret:mi},atr:{value:av[av.length-1]},volume:{ratio:vd.ratio,interpret:vi}}};
-    } catch(e) { return null; }
+      
+      const trend = score>0?'bullish':score<0?'bearish':'neutral';
+      
+      return {
+        score,
+        trend,
+        weight: w,
+        indicators: {
+          ema:{fast:ef[ef.length-1],slow:es[es.length-1],cross:ec},
+          rsi:{value:rsiVal,interpret:ri},
+          macd:{interpret:mi,histogram:hist},
+          atr:{value:av[av.length-1]},
+          volume:{ratio:vd.ratio,interpret:vi}
+        }
+      };
+    } catch(e) { this.#logger.error('Calc error:',e.message); return null; }
   }
 }
