@@ -14,6 +14,9 @@ import { TelegramService } from './telegram/TelegramService.js';
 import { AIValidator } from './ai/AIValidator.js';
 import { ReportService } from './reports/ReportService.js';
 import { HealthMonitor } from './monitor/HealthMonitor.js';
+import { WebDashboard } from './monitor/WebDashboard.js';
+import { BackupManager } from './database/BackupManager.js';
+import { join } from 'path';
 
 class App {
   #container; #logger; #isRunning = false;
@@ -31,7 +34,6 @@ class App {
       this.#logger.info('AI Agent V4 started successfully');
     } catch (error) {
       console.error('Fatal startup error:', error.message);
-      console.error(error.stack);
       process.exit(1);
     }
   }
@@ -84,6 +86,12 @@ class App {
 
     const healthMonitor = new HealthMonitor(config, logger, telegram, database, exchange);
     this.#container.register('healthMonitor', healthMonitor);
+
+    const webDashboard = new WebDashboard(config, logger, database, tradeManager);
+    this.#container.register('webDashboard', webDashboard);
+
+    const backupManager = new BackupManager(join(process.cwd(), 'storage', 'agent.db'), logger);
+    this.#container.register('backupManager', backupManager);
   }
 
   async #initializeServices() {
@@ -101,6 +109,12 @@ class App {
 
     const healthMonitor = this.#container.resolve('healthMonitor');
     healthMonitor.start();
+
+    const webDashboard = this.#container.resolve('webDashboard');
+    webDashboard.start();
+
+    const backupManager = this.#container.resolve('backupManager');
+    backupManager.start();
   }
 
   #setupGracefulShutdown() {
@@ -112,6 +126,8 @@ class App {
         this.#container.resolve('tradeManager').shutdown();
         this.#container.resolve('reportService').stop();
         this.#container.resolve('healthMonitor').stop();
+        this.#container.resolve('webDashboard').stop();
+        this.#container.resolve('backupManager').stop();
         await this.#container.resolve('database').close();
         this.#logger.info('Shutdown complete');
         process.exit(0);

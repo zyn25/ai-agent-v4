@@ -3,13 +3,17 @@ import { PositionRepository } from '../database/repositories/PositionRepository.
 import { PortfolioRepository } from '../database/repositories/PortfolioRepository.js';
 import { OrderbookAnalyzer } from '../strategy/OrderbookAnalyzer.js';
 import { MarketFilter } from '../strategy/MarketFilter.js';
+import { SessionFilter } from '../strategy/SessionFilter.js';
+import { CorrelationChecker } from '../strategy/CorrelationChecker.js';
+import { PositionScaler } from './PositionScaler.js';
 import { OrderDeduplicator } from './OrderDeduplicator.js';
 import { withRetry } from '../utils/retry.js';
 import { EventEmitter } from 'events';
 
 export class TradeManager extends EventEmitter {
   #config; #logger; #db; #exchange; #signalEngine; #riskEngine; #aiValidator; #eventBus;
-  #pm; #posRepo; #portRepo; #orderbook; #marketFilter; #deduplicator;
+  #pm; #posRepo; #portRepo; #orderbook; #marketFilter; #sessionFilter;
+  #correlationChecker; #scaler; #deduplicator;
   #running=false; #loop=null; #reconnect=0;
   #paused=false; #pauseReason=''; #lastTradeTime=0;
 
@@ -20,6 +24,9 @@ export class TradeManager extends EventEmitter {
     this.#portRepo=new PortfolioRepository(db);
     this.#orderbook=new OrderbookAnalyzer(ex,l);
     this.#marketFilter=new MarketFilter(c,l);
+    this.#sessionFilter=new SessionFilter(c,l);
+    this.#correlationChecker=new CorrelationChecker(db,l);
+    this.#scaler=new PositionScaler(c,l);
     this.#deduplicator=new OrderDeduplicator(c);
   }
 
@@ -83,9 +90,16 @@ export class TradeManager extends EventEmitter {
 
     try { await this.#monitor(); this.#reconnect=0; }
     catch(e) {
-      this.#logger.error('Monitor error:',e.message);
+      this.#logger.error('Monitor:',e.message);
       this.#reconnect++;
       if(this.#reconnect>=5){this.#logger.error('Exchange down. Pause 5min.');await this.#sleep(300000);this.#reconnect=0;}
+      return;
+    }
+
+    // Session filter
+    const session=this.#sessionFilter.check();
+    if(!session.trade) {
+      this.#logger.trade('['+now+'] Session blocked: '+session.reason);
       return;
     }
 
@@ -103,7 +117,7 @@ export class TradeManager extends EventEmitter {
       return;
     }
 
-    this.#logger.trade('['+now+'] Scanning '+this.#config.pairs.length+' pairs...');
+    this.#logger.trade('['+now+'] Scanning '+this.#config.pairs.length+' pairs | Session: '+session.session);
 
     for (const pair of this.#config.pairs) {
       try {
@@ -115,10 +129,10 @@ export class TradeManager extends EventEmitter {
   }
 
   async #scanPair(pair, now) {
-    // Market filter check
+    // Market filter
     const ohlcv = await withRetry(
       ()=>this.#exchange.fetchOHLCV(pair, this.#config.timeframes.primary, undefined, 200),
-      { maxRetries: 2, onRetry: (a,m,d,e) => this.#logger.warn('Retry fetchOHLCV '+pair+': '+e) }
+      { maxRetries: 2, onRetry: (a,m,d,e) => this.#logger.warn('Retry '+pair+': '+e) }
     );
 
     const marketCheck = await this.#marketFilter.check(ohlcv);
@@ -127,34 +141,38 @@ export class TradeManager extends EventEmitter {
       return;
     }
 
-    // Signal analysis
+    // Signal
     const signal = await this.#signalEngine.analyze(pair);
     if (signal.side === 'neutral') {
       this.#logger.trade('['+now+'] '+pair+' no signal');
       return;
     }
 
-    this.#logger.trade('['+now+'] '+pair+' SIGNAL: '+signal.side+' | '+signal.confidence+'% | '+signal.reason);
+    this.#logger.trade('['+now+'] '+pair+' SIGNAL: '+signal.side+' | '+signal.confidence+'%');
 
     // Duplicate check
     if (this.#deduplicator.isDuplicate(pair, signal.side)) {
-      const remaining = Math.ceil(this.#deduplicator.timeUntilAllowed(pair, signal.side) / 60000);
-      this.#logger.trade('['+now+'] '+pair+' DUPLICATE: wait '+remaining+'min');
+      this.#logger.trade('['+now+'] '+pair+' DUPLICATE');
       return;
     }
 
-    // Orderbook validation
-    const ob=await this.#orderbook.analyze(pair);
-    if(ob) {
-      this.#logger.trade('['+now+'] '+pair+' OB: bias='+ob.bias+' ratio='+ob.bidAskRatio.toFixed(2));
+    // Correlation check
+    const corr=this.#correlationChecker.check(pair, signal.side);
+    if(!corr.allowed) {
+      this.#logger.trade('['+now+'] '+pair+' CORRELATION BLOCKED: '+corr.reason);
+      return;
     }
+
+    // Orderbook
+    const ob=await this.#orderbook.analyze(pair);
+    if(ob) this.#logger.trade('['+now+'] '+pair+' OB: bias='+ob.bias);
     const obDecision=this.#orderbook.validateSignal(signal,ob);
     if(obDecision==='reject') {
       this.#logger.trade('['+now+'] '+pair+' OB REJECTED');
       return;
     }
 
-    // AI validation
+    // AI
     let ai={decision:'approve',confidence:signal.confidence};
     if(this.#config.ai.enabled) {
       this.#logger.trade('['+now+'] '+pair+' AI validating...');
@@ -166,7 +184,6 @@ export class TradeManager extends EventEmitter {
       this.#logger.trade('['+now+'] '+pair+' AI APPROVED: '+ai.confidence+'%');
     }
 
-    // Execute
     await this.#execute(signal,ai,obDecision);
   }
 
@@ -180,7 +197,6 @@ export class TradeManager extends EventEmitter {
       const sz=this.#riskEngine.calculatePositionSize(bal,entry,lv.stopLoss);
 
       if(obDecision==='caution') { sz.quantity*=0.5; sz.riskAmount*=0.5; }
-
       if(sz.quantity<=0||sz.marginRequired>bal){this.#logger.trade('Skip: sizing');return;}
 
       const id='T-'+Date.now().toString(36)+'-'+Math.random().toString(36).substring(2,8);
@@ -264,4 +280,5 @@ export class TradeManager extends EventEmitter {
   getLastTradeTime() { return this.#lastTradeTime; }
   get orderbook() { return this.#orderbook; }
   get marketFilter() { return this.#marketFilter; }
+  get sessionFilter() { return this.#sessionFilter; }
 }
