@@ -38,6 +38,26 @@ export class TelegramService {
     } catch(e){this.#logger.error('TG init fail:',e.message);}
   }
 
+  async #fetchPrices() {
+    const prices = {};
+    const pairs = this.#config.pairs;
+    for (const pair of pairs) {
+      try {
+        const ticker = await this.#tradeManager.orderbook?.analyze?.constructor ? null : null;
+        // Use exchange directly
+        const exchange = this.#tradeManager.orderbook ? null : null;
+      } catch {}
+    }
+    // Fetch from orderbook analyzer
+    for (const pair of pairs) {
+      try {
+        const ob = await this.#tradeManager.orderbook.analyze(pair);
+        if (ob && ob.midPrice) prices[pair] = ob.midPrice;
+      } catch {}
+    }
+    return prices;
+  }
+
   #setupEvents() {
     this.#eventBus.on('trade:opened',d=>this.#send(this.#fmt.formatEntry(d)));
     this.#eventBus.on('trade:closed',d=>this.#send(this.#fmt.formatExit(d)));
@@ -49,8 +69,8 @@ export class TelegramService {
   #setupCommands() {
     this.#bot.onText(/\/start/,()=>this.#send(this.#helpText()));
     this.#bot.onText(/\/help/,()=>this.#send(this.#helpText()));
-    this.#bot.onText(/\/status/,()=>{const p=this.#portRepo.getCurrent();const pos=this.#posRepo.findOpen();this.#send(this.#fmt.formatDashboard(p,pos));});
-    this.#bot.onText(/\/positions/,()=>this.#send(this.#fmt.formatOpenPositions(this.#posRepo.findOpen())));
+    this.#bot.onText(/\/status/,async()=>this.#cmdStatus());
+    this.#bot.onText(/\/positions/,async()=>this.#cmdPositions());
     this.#bot.onText(/\/balance/,()=>this.#cmdBalance());
     this.#bot.onText(/\/trades/,()=>this.#cmdTrades());
     this.#bot.onText(/\/stats/,()=>this.#cmdStats());
@@ -81,6 +101,30 @@ export class TelegramService {
       '⚙️ <b>Settings:</b>\n/config /risk /health /mode\n\n' +
       '🎯 <b>Strategy:</b>\n/aggressive /balanced /conservative /scalping\n\n' +
       '🚨 <b>Emergency:</b>\n/pause /resume /closeall /closelast';
+  }
+
+  async #cmdStatus() {
+    try {
+      const p = this.#portRepo.getCurrent();
+      const pos = this.#posRepo.findOpen();
+      const prices = await this.#fetchPrices();
+      this.#send(this.#fmt.formatDashboard(p, pos, prices));
+    } catch(e) {
+      const p = this.#portRepo.getCurrent();
+      const pos = this.#posRepo.findOpen();
+      this.#send(this.#fmt.formatDashboard(p, pos, null));
+    }
+  }
+
+  async #cmdPositions() {
+    try {
+      const pos = this.#posRepo.findOpen();
+      const prices = await this.#fetchPrices();
+      this.#send(this.#fmt.formatOpenPositions(pos, prices));
+    } catch(e) {
+      const pos = this.#posRepo.findOpen();
+      this.#send(this.#fmt.formatOpenPositions(pos, null));
+    }
   }
 
   #cmdBalance() {
@@ -173,14 +217,11 @@ export class TelegramService {
         'Trades: '+a.totalTrades+' | W: '+a.wins+' | L: '+a.losses+'\n' +
         'Win Rate: '+a.winRate+'%\n' +
         'PnL: $'+a.totalPnl+'\n' +
-        'Profit Factor: '+a.profitFactor+'\n' +
+        'PF: '+a.profitFactor+'\n' +
         'Expectancy: $'+a.expectancy+'/trade\n' +
         'Sharpe: '+a.sharpeRatio+'\n' +
         'Sortino: '+a.sortinoRatio+'\n' +
-        'Calmar: '+a.calmarRatio+'\n' +
-        'Recovery: '+a.recoveryFactor+'\n' +
         'Max DD: '+a.maxDrawdownPct+'%\n' +
-        'Payoff: '+a.payoffRatio+'\n' +
         'Win Streak: '+a.maxWinStreak+' | Loss Streak: '+a.maxLossStreak+'\n' +
         'Best Hour: '+a.bestHour+'\n' +
         'Avg Hold: '+a.avgHoldHours+'h'
