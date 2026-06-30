@@ -103,6 +103,7 @@ class App {
 
     const tradeManager = this.#container.resolve('tradeManager');
     await tradeManager.initialize();
+    const strategyMode = this.#container.resolve("strategyMode"); strategyMode.loadFromDatabase();
 
     const reportService = this.#container.resolve('reportService');
     reportService.start();
