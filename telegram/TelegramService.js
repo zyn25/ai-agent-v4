@@ -9,9 +9,6 @@ import { TIMING } from '../utils/constants.js';
 import { totalmem, freemem, cpus } from 'os';
 import { execSync } from 'child_process';
 
-/**
- * Telegram service with AI notification support.
- */
 export class TelegramService {
   #config; #logger; #eventBus; #tradeManager; #bot=null; #fmt; #chatId;
   #portRepo; #posRepo; #db; #sizer; #journal; #analytics; #strategyMode;
@@ -55,14 +52,11 @@ export class TelegramService {
   }
 
   #setupEvents() {
-    // Trade events
     this.#eventBus.on('trade:opened',d=>this.#send(this.#fmt.formatEntry(d)));
     this.#eventBus.on('trade:closed',d=>this.#send(this.#fmt.formatExit(d)));
     this.#eventBus.on('trade:partial_close',d=>this.#send(this.#fmt.formatPartialClose(d)));
     this.#eventBus.on('trade:paused',d=>this.#send('⏸️ <b>PAUSED</b>\n\n'+d.reason));
     this.#eventBus.on('trade:resumed',()=>this.#send('▶️ <b>RESUMED</b>'));
-
-    // AI validation event
     this.#eventBus.on('ai:validated',d=>this.#send(this.#formatAI(d)));
   }
 
@@ -70,16 +64,15 @@ export class TelegramService {
     const t = new Date().toISOString().replace('T',' ').substring(0,19);
     const emoji = d.decision === 'approve' ? '✅' : d.decision === 'reject' ? '❌' : '⏳';
     const confColor = d.confidence >= 70 ? '🟢' : d.confidence >= 50 ? '🟡' : '🔴';
-
-    return `🤖 <b>AI VALIDATION</b>\n\n` +
-      `Pair:       <code>${d.pair}</code>\n` +
-      `Side:       <code>${d.side?.toUpperCase() || 'N/A'}</code>\n` +
-      `Decision:   <code>${emoji} ${d.decision?.toUpperCase()}</code>\n` +
-      `Confidence: <code>${confColor} ${d.confidence}%</code>\n` +
-      `Reason:     <code>${d.reason || 'N/A'}</code>\n` +
-      `Latency:    <code>${d.latency || 0}ms</code>\n` +
-      `Fallback:   <code>${d.fallback ? 'Yes' : 'No'}</code>\n\n` +
-      `🕐 ${t}`;
+    return '🤖 <b>AI VALIDATION</b>\n\n'+
+      'Pair:       <code>'+d.pair+'</code>\n'+
+      'Side:       <code>'+(d.side?.toUpperCase()||'N/A')+'</code>\n'+
+      'Decision:   <code>'+emoji+' '+(d.decision?.toUpperCase()||'N/A')+'</code>\n'+
+      'Confidence: <code>'+confColor+' '+d.confidence+'%</code>\n'+
+      'Reason:     <code>'+(d.reason||'N/A')+'</code>\n'+
+      'Latency:    <code>'+(d.latency||0)+'ms</code>\n'+
+      'Fallback:   <code>'+(d.fallback?'Yes':'No')+'</code>\n\n'+
+      '🕐 '+t;
   }
 
   #setupCommands() {
@@ -92,7 +85,7 @@ export class TelegramService {
     this.#bot.onText(/\/stats/,()=>this.#cmdStats());
     this.#bot.onText(/\/config/,()=>this.#cmdConfig());
     this.#bot.onText(/\/risk/,()=>this.#cmdRisk());
-    this.#bot.onText(/\/health/,()=>this.#cmdHealth());
+    this.#bot.onText(/\/health/,async()=>this.#cmdHealth());
     this.#bot.onText(/\/equity/,()=>this.#cmdEquity());
     this.#bot.onText(/\/pause/,()=>{this.#tradeManager.pause('Manual');this.#send('⏸️ Paused');});
     this.#bot.onText(/\/resume/,()=>{this.#tradeManager.resume();this.#send('▶️ Resumed');});
@@ -130,9 +123,9 @@ export class TelegramService {
           const cp=prices[position.pair]; if(!cp) continue;
           const qty=position.remaining_quantity||position.quantity;
           const pnl=position.side==='long'?(cp-position.entry_price)*qty:(position.entry_price-cp)*qty;
-          const pct=(pnl/(position.entry_price*qty))*100;
+          const pct=position.entry_price>0?(pnl/(position.entry_price*qty))*100:0;
           floatingPnl+=pnl;
-          posLines+=(pnl>=0?'🟢':'🔴')+' <code>'+position.pair+'</code> <code>'+(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' ('+(pnl>=0?'+':'')+pct.toFixed(2)+'%)</code>\n';
+          posLines+=(pnl>=0?'🟢':'🔴')+' <code>'+position.pair+' '+position.side.toUpperCase()+'</code> <code>'+(pnl>=0?'+':'')+'$'+pnl.toFixed(2)+' ('+(pnl>=0?'+':'')+pct.toFixed(2)+'%)</code>\n';
         }
       }
 
@@ -145,24 +138,24 @@ export class TelegramService {
       const ram=Math.round(((totalmem()-freemem())/totalmem())*100);
 
       this.#send(
-        '📊 <b>DASHBOARD</b>\n\n' +
-        'Balance:       <code>$'+(p?.balance||0).toFixed(2)+'</code>\n' +
-        'Equity:        <code>$'+totalEquity.toFixed(2)+'</code>\n' +
-        'Floating:      <code>'+(floatingPnl>=0?'+':'')+'$'+floatingPnl.toFixed(2)+'</code>\n' +
-        'Realized:      <code>$'+(p?.realized_pnl||0).toFixed(2)+'</code>\n' +
-        'Daily PnL:     <code>'+((p?.daily_pnl||0)>=0?'+':'')+'$'+(p?.daily_pnl||0).toFixed(2)+'</code>\n' +
-        'Weekly:        <code>'+((p?.weekly_pnl||0)>=0?'+':'')+'$'+(p?.weekly_pnl||0).toFixed(2)+'</code>\n' +
-        'Monthly:       <code>'+((p?.monthly_pnl||0)>=0?'+':'')+'$'+(p?.monthly_pnl||0).toFixed(2)+'</code>\n' +
-        'DD:            <code>'+ddPct.toFixed(2)+'%</code>\n' +
-        'Win Rate:      <code>'+(p?.win_rate||0).toFixed(1)+'%</code>\n' +
-        'Profit Factor: <code>'+pf+'</code>\n' +
-        'Avg Hold:      <code>'+avgHoldH+'</code>\n' +
-        'Open:          <code>'+(pos?pos.length:0)+'</code>\n' +
-        'CPU:           <code>'+cpu+'%</code>\n' +
-        'RAM:           <code>'+ram+'%</code>\n' +
-        'AI:            <code>'+(this.#config.ai.enabled?'✅ ON':'❌ OFF')+'</code>\n' +
-        'Exchange:      <code>✅ Connected</code>\n\n' +
-        (posLines?'📈 <b>POSITIONS:</b>\n'+posLines+'\n':'') +
+        '📊 <b>DASHBOARD</b>\n\n'+
+        'Balance:       <code>$'+(p?.balance||0).toFixed(2)+'</code>\n'+
+        'Equity:        <code>$'+totalEquity.toFixed(2)+'</code>\n'+
+        'Floating:      <code>'+(floatingPnl>=0?'+':'')+'$'+floatingPnl.toFixed(2)+'</code>\n'+
+        'Realized:      <code>$'+(p?.realized_pnl||0).toFixed(2)+'</code>\n'+
+        'Daily PnL:     <code>'+((p?.daily_pnl||0)>=0?'+':'')+'$'+(p?.daily_pnl||0).toFixed(2)+'</code>\n'+
+        'Weekly:        <code>'+((p?.weekly_pnl||0)>=0?'+':'')+'$'+(p?.weekly_pnl||0).toFixed(2)+'</code>\n'+
+        'Monthly:       <code>'+((p?.monthly_pnl||0)>=0?'+':'')+'$'+(p?.monthly_pnl||0).toFixed(2)+'</code>\n'+
+        'DD:            <code>'+ddPct.toFixed(2)+'%</code>\n'+
+        'Win Rate:      <code>'+(p?.win_rate||0).toFixed(1)+'%</code>\n'+
+        'Profit Factor: <code>'+pf+'</code>\n'+
+        'Avg Hold:      <code>'+avgHoldH+'</code>\n'+
+        'Open:          <code>'+(pos?pos.length:0)+'</code>\n'+
+        'CPU:           <code>'+cpu+'%</code>\n'+
+        'RAM:           <code>'+ram+'%</code>\n'+
+        'AI:            <code>'+(this.#config.ai.enabled?'✅ ON':'❌ OFF')+'</code>\n'+
+        'Exchange:      <code>✅ Connected</code>\n\n'+
+        (posLines?'📈 <b>POSITIONS:</b>\n'+posLines+'\n':'')+
         '🕐 '+this.#ts()
       );
     } catch(e) { this.#send('Status error'); }
@@ -182,16 +175,12 @@ export class TelegramService {
     this.#send('💰 <b>BALANCE</b>\n\nBalance: $'+p.balance.toFixed(2)+'\nEquity: $'+p.equity.toFixed(2)+'\nRealized: $'+p.realized_pnl.toFixed(2)+'\nPeak: $'+(p.peak_balance||p.balance).toFixed(2));
   }
 
+  // FIX: Better trade history format
   #cmdTrades() {
-    const t=this.#posRepo.findAll(10);
-    if(!t||!t.length){this.#send('No trades');return;}
-    let m='📋 <b>TRADES</b>\n\n';
-    t.forEach(x=>{
-      const pnlStr=(x.pnl>=0?'+':'')+'$'+(x.pnl||0).toFixed(2);
-      const emoji=x.status==='open'?'🟢':(x.pnl>0?'💰':'💸');
-      m+=emoji+' '+x.id+' | '+x.side+' | '+pnlStr+' | '+(x.exit_reason||'open')+'\n';
-    });
-    this.#send(m);
+    const trades = this.#db.prepare(
+      "SELECT * FROM positions WHERE status IN ('open','closed') ORDER BY created_at DESC LIMIT 10"
+    ).all();
+    this.#send(this.#fmt.formatTradeHistory(trades));
   }
 
   #cmdStats() {
@@ -229,17 +218,17 @@ export class TelegramService {
     } catch { exStatus='❌'; this.#exchangeLatency=-1; }
 
     this.#send(
-      '🏥 <b>HEALTH</b>\n\n' +
-      'CPU:            <code>'+cpu+'%</code>\n' +
-      'RAM:            <code>'+ram+'%</code>\n' +
-      'Disk:           <code>'+disk+'%</code>\n' +
-      'Uptime:         <code>'+h+'h '+m+'m</code>\n' +
-      'Positions:      <code>'+this.#posRepo.countOpen()+'</code>\n' +
-      'Mode:           <code>'+this.#strategyMode.getModeName()+'</code>\n' +
-      'Status:         <code>'+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'</code>\n' +
-      'Exchange:       <code>'+exStatus+' ('+this.#exchangeLatency+'ms)</code>\n' +
-      'Telegram:       <code>✅ Connected</code>\n' +
-      'AI:             <code>'+(this.#config.ai.enabled?'✅ ON':'❌ OFF')+'</code>\n' +
+      '🏥 <b>HEALTH</b>\n\n'+
+      'CPU:            <code>'+cpu+'%</code>\n'+
+      'RAM:            <code>'+ram+'%</code>\n'+
+      'Disk:           <code>'+disk+'%</code>\n'+
+      'Uptime:         <code>'+h+'h '+m+'m</code>\n'+
+      'Positions:      <code>'+this.#posRepo.countOpen()+'</code>\n'+
+      'Mode:           <code>'+this.#strategyMode.getModeName()+'</code>\n'+
+      'Status:         <code>'+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'</code>\n'+
+      'Exchange:       <code>'+exStatus+' ('+this.#exchangeLatency+'ms)</code>\n'+
+      'Telegram:       <code>✅ Connected</code>\n'+
+      'AI:             <code>'+(this.#config.ai.enabled?'✅ ON':'❌ OFF')+'</code>\n'+
       'DB:             <code>✅ OK</code>'
     );
   }
