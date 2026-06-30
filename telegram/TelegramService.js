@@ -137,14 +137,14 @@ export class TelegramService {
     for (const t of trades) {
       const emoji = t.status === 'open' ? '🟢' : (t.pnl > 0 ? '💰' : '💸');
       const sign = t.pnl >= 0 ? '+' : '';
-      const holdStr = t.hold_duration ? this.#fmt.#duration(t.hold_duration) : 'Open';
+      const h=Math.floor((t.hold_duration||0)/3600000); const mm=Math.floor(((t.hold_duration||0)%3600000)/60000); const holdStr = t.hold_duration ? (h>0?h+"h "+mm+"m":mm+"m") : "Open";
       const exitReason = t.exit_reason || 'open';
       const status = t.status === 'open' ? 'OPEN' : exitReason.toUpperCase();
 
       m += emoji+' <b>'+t.id+'</b>\n';
       m += '   '+t.pair+' | '+t.side.toUpperCase()+'\n';
-      m += '   Entry: $'+this.#fmt.#fp(t.entry_price);
-      if (t.exit_price) m += ' → $'+this.#fmt.#fp(t.exit_price);
+      m += '   Entry: $'+((p)=>p>=1000?p.toFixed(2):p>=1?p.toFixed(4):p.toFixed(6))(t.entry_price);
+      if (t.exit_price) m += ' → $'+((p)=>p>=1000?p.toFixed(2):p>=1?p.toFixed(4):p.toFixed(6))(t.exit_price);
       m += '\n';
       m += '   PnL: '+sign+'$'+(t.pnl||0).toFixed(2);
       if (t.roi) m += ' ('+sign+t.roi.toFixed(2)+'%)';
