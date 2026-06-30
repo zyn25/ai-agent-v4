@@ -57,7 +57,7 @@ export class TelegramService {
     this.#eventBus.on('trade:partial_close',d=>this.#send(this.#fmt.formatPartialClose(d)));
     this.#eventBus.on('trade:paused',d=>this.#send('⏸️ <b>PAUSED</b>\n\n'+d.reason));
     this.#eventBus.on('trade:resumed',()=>this.#send('▶️ <b>RESUMED</b>'));
-    this.#eventBus.on('ai:validated',d=>this.#send(this.#formatAI(d)));
+    this.#eventBus.on('ai:validated',d=>{if(d.decision==='approve')this.#send(this.#formatAI(d));});
   }
 
   #formatAI(d) {
