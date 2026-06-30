@@ -57,7 +57,7 @@ export class MessageFormatter {
         if (!cp) continue;
         const qty = position.remaining_quantity || position.quantity;
         const pnl = position.side === 'long' ? (cp - position.entry_price) * qty : (position.entry_price - cp) * qty;
-        const pct = pos.entry_price > 0 ? (pnl / (position.entry_price * qty)) * 100 : 0;
+        const pct = position.entry_price > 0 ? (pnl / (position.entry_price * qty)) * 100 : 0;
         floatingPnl += pnl;
         const emoji = pnl >= 0 ? '🟢' : '🔴';
         const sign = pnl >= 0 ? '+' : '';
