@@ -11,9 +11,6 @@ import { withRetry } from '../utils/retry.js';
 import { TRADING, TIMING } from '../utils/constants.js';
 import { EventEmitter } from 'events';
 
-/**
- * Trade manager - FIX: tighter trailing stop activation
- */
 export class TradeManager extends EventEmitter {
   #config; #logger; #db; #exchange; #signalEngine; #riskEngine; #aiValidator; #eventBus;
   #pm; #posRepo; #portRepo; #orderbook; #marketFilter; #sessionFilter;
@@ -188,10 +185,27 @@ export class TradeManager extends EventEmitter {
       return;
     }
 
+    // AI Validation
     let ai = { decision: 'approve', confidence: signal.confidence };
     if (this.#config.ai.enabled) {
       this.#lifecycle.aiValidation(pair, ai);
+      this.#logger.trade('[' + now + '] ' + pair + ' AI validating...');
+
+      const aiStart = Date.now();
       ai = await this.#aiValidator.validate(signal);
+      const aiLatency = Date.now() - aiStart;
+
+      // FIX: Emit AI event to Telegram
+      this.#eventBus.emit('ai:validated', {
+        pair: pair,
+        side: signal.side,
+        decision: ai.decision,
+        confidence: ai.confidence,
+        reason: ai.reason,
+        latency: aiLatency,
+        fallback: ai.fallback || false,
+      });
+
       if (ai.decision !== 'approve') {
         this.#logger.trade('[' + now + '] ' + pair + ' AI REJECTED: ' + ai.reason);
         return;
@@ -252,21 +266,16 @@ export class TradeManager extends EventEmitter {
   async #check(pos, price) {
     const pnl = this.#calcPnl(pos, price);
 
-    // Stop Loss
     if (pos.side === 'long' ? price <= pos.stop_loss : price >= pos.stop_loss) {
       this.#lifecycle.stopLoss(pos.id, price, pnl);
-      await this.#close(pos, price, 'stop_loss', pnl);
-      return;
+      await this.#close(pos, price, 'stop_loss', pnl); return;
     }
 
-    // Max Hold
     if (Date.now() - new Date(pos.open_time).getTime() > this.#config.risk.maxHoldHours * 3600000) {
       this.#lifecycle.maxHoldExit(pos.id, price, pnl);
-      await this.#close(pos, price, 'max_hold', pnl);
-      return;
+      await this.#close(pos, price, 'max_hold', pnl); return;
     }
 
-    // Partial TP
     const qty = pos.remaining_quantity || pos.quantity;
     const ptpIndex = pos.partial_tp_index || 0;
     const ptp = this.#riskEngine.shouldPartialTP(price, pos.entry_price, pos.side, ptpIndex);
@@ -287,7 +296,6 @@ export class TradeManager extends EventEmitter {
         this.#eventBus.emit('trade:partial_close', { ...pos, closePrice: price, closeQty, pnl: net, level: newIdx, remaining });
         this.#logger.trade('PTP#' + newIdx + ': ' + pos.id + ' | $' + net.toFixed(2));
 
-        // FIX: Move SL to break even after FIRST partial TP (not just PTP1)
         if (newIdx >= 1) {
           this.#pm.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: true });
           this.#posRepo.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: 1 });
@@ -297,35 +305,29 @@ export class TradeManager extends EventEmitter {
       }
     }
 
-    // Final TP
     if (pos.side === 'long' ? price >= pos.take_profit : price <= pos.take_profit) {
       this.#lifecycle.finalTP(pos.id, price, pnl);
-      await this.#close(pos, price, 'take_profit', pnl);
-      return;
+      await this.#close(pos, price, 'take_profit', pnl); return;
     }
 
-    // Break Even (even without PTP)
     if (!pos.break_even_applied && pos.break_even_price &&
         this.#riskEngine.shouldBreakEven(price, pos.entry_price, pos.break_even_price, pos.side)) {
       this.#pm.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: true });
       this.#posRepo.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: 1 });
       this.#lifecycle.breakEven(pos.id, price);
-      this.#logger.trade('BREAK EVEN: ' + pos.id + ' | SL moved to ' + pos.entry_price);
+      this.#logger.trade('BREAK EVEN: ' + pos.id);
     }
 
-    // Trailing Stop - FIX: Activate after 0.5R profit (not immediately)
     const atr = Math.abs(pos.entry_price - pos.stop_loss) / this.#config.indicators.atrSlMultiplier;
     const profitDistance = pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price;
     const profitInR = atr > 0 ? profitDistance / atr : 0;
 
-    // Only activate trailing stop after 0.5R profit
     if (profitInR >= 0.5) {
       const ts = this.#riskEngine.getTrailingStop(price, atr, pos.side);
       if (pos.trailing_stop) {
         if ((pos.side === 'long' && price <= pos.trailing_stop) || (pos.side === 'short' && price >= pos.trailing_stop)) {
           this.#lifecycle.trailingStop(pos.id, price);
-          await this.#close(pos, price, 'trailing_stop', pnl);
-          return;
+          await this.#close(pos, price, 'trailing_stop', pnl); return;
         }
       }
       if (ts && (!pos.trailing_stop || (pos.side === 'long' && ts > pos.trailing_stop) || (pos.side === 'short' && ts < pos.trailing_stop))) {

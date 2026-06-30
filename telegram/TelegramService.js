@@ -10,8 +10,7 @@ import { totalmem, freemem, cpus } from 'os';
 import { execSync } from 'child_process';
 
 /**
- * Telegram service - notifications, commands, dashboard.
- * All dashboard metrics per master prompt.
+ * Telegram service with AI notification support.
  */
 export class TelegramService {
   #config; #logger; #eventBus; #tradeManager; #bot=null; #fmt; #chatId;
@@ -56,11 +55,31 @@ export class TelegramService {
   }
 
   #setupEvents() {
+    // Trade events
     this.#eventBus.on('trade:opened',d=>this.#send(this.#fmt.formatEntry(d)));
     this.#eventBus.on('trade:closed',d=>this.#send(this.#fmt.formatExit(d)));
     this.#eventBus.on('trade:partial_close',d=>this.#send(this.#fmt.formatPartialClose(d)));
     this.#eventBus.on('trade:paused',d=>this.#send('⏸️ <b>PAUSED</b>\n\n'+d.reason));
     this.#eventBus.on('trade:resumed',()=>this.#send('▶️ <b>RESUMED</b>'));
+
+    // AI validation event
+    this.#eventBus.on('ai:validated',d=>this.#send(this.#formatAI(d)));
+  }
+
+  #formatAI(d) {
+    const t = new Date().toISOString().replace('T',' ').substring(0,19);
+    const emoji = d.decision === 'approve' ? '✅' : d.decision === 'reject' ? '❌' : '⏳';
+    const confColor = d.confidence >= 70 ? '🟢' : d.confidence >= 50 ? '🟡' : '🔴';
+
+    return `🤖 <b>AI VALIDATION</b>\n\n` +
+      `Pair:       <code>${d.pair}</code>\n` +
+      `Side:       <code>${d.side?.toUpperCase() || 'N/A'}</code>\n` +
+      `Decision:   <code>${emoji} ${d.decision?.toUpperCase()}</code>\n` +
+      `Confidence: <code>${confColor} ${d.confidence}%</code>\n` +
+      `Reason:     <code>${d.reason || 'N/A'}</code>\n` +
+      `Latency:    <code>${d.latency || 0}ms</code>\n` +
+      `Fallback:   <code>${d.fallback ? 'Yes' : 'No'}</code>\n\n` +
+      `🕐 ${t}`;
   }
 
   #setupCommands() {
@@ -102,7 +121,7 @@ export class TelegramService {
       const prices=await this.#fetchPrices();
       const s=this.#posRepo.getStats();
       const pf=s&&s.total>0&&s.losses>0?(Math.abs(s.total_pnl)/Math.abs(s.worst_trade||1)).toFixed(2):'N/A';
-      const avgHoldMs=s&&s.total>0?(s.avg_hold_duration||s.avg_pnl||0):0;
+      const avgHoldMs=s&&s.total>0?(s.avg_hold_duration||0):0;
       const avgHoldH=avgHoldMs>0?(avgHoldMs/3600000).toFixed(1)+'h':'N/A';
 
       let floatingPnl=0, posLines='';
@@ -120,13 +139,10 @@ export class TelegramService {
       const totalEquity=(p?.balance||0)+floatingPnl;
       const ddPct=p?.peak_balance>0?((p.peak_balance-totalEquity)/p.peak_balance*100):0;
 
-      // System metrics
       const ci=cpus(); let idle=0,total=0;
       ci.forEach(c=>{for(const t in c.times)total+=c.times[t];idle+=c.times.idle;});
       const cpu=total>0?Math.round(((total-idle)/total)*100):0;
       const ram=Math.round(((totalmem()-freemem())/totalmem())*100);
-      let disk=0;
-      try { disk=parseInt(execSync("df -h / | tail -1 | awk '{print $5}'").toString().trim(),10)||0; } catch {}
 
       this.#send(
         '📊 <b>DASHBOARD</b>\n\n' +
@@ -144,7 +160,6 @@ export class TelegramService {
         'Open:          <code>'+(pos?pos.length:0)+'</code>\n' +
         'CPU:           <code>'+cpu+'%</code>\n' +
         'RAM:           <code>'+ram+'%</code>\n' +
-        'Disk:          <code>'+disk+'%</code>\n' +
         'AI:            <code>'+(this.#config.ai.enabled?'✅ ON':'❌ OFF')+'</code>\n' +
         'Exchange:      <code>✅ Connected</code>\n\n' +
         (posLines?'📈 <b>POSITIONS:</b>\n'+posLines+'\n':'') +
@@ -206,7 +221,6 @@ export class TelegramService {
     const up=Math.round((Date.now()-this.#startTime)/1000);
     const h=Math.floor(up/3600); const m=Math.floor((up%3600)/60);
 
-    // Test exchange latency
     let exStatus='✅';
     try {
       const start=Date.now();
