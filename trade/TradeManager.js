@@ -12,7 +12,7 @@ import { TRADING, TIMING } from '../utils/constants.js';
 import { EventEmitter } from 'events';
 
 /**
- * Trade manager - orchestrates the complete trading loop.
+ * Trade manager - FIX: tighter trailing stop activation
  */
 export class TradeManager extends EventEmitter {
   #config; #logger; #db; #exchange; #signalEngine; #riskEngine; #aiValidator; #eventBus;
@@ -70,8 +70,6 @@ export class TradeManager extends EventEmitter {
         this.#db.prepare(
           'INSERT INTO equity_curve (balance, equity, drawdown, drawdown_pct, peak_balance, open_positions) VALUES (?, ?, ?, ?, ?, ?)'
         ).run(p.balance, equity, peak - equity, dd, peak, open.length);
-
-        // FIX: Cleanup old equity data (keep last 7 days only)
         this.#db.prepare(
           "DELETE FROM equity_curve WHERE created_at < datetime('now', '-7 days')"
         ).run();
@@ -79,7 +77,6 @@ export class TradeManager extends EventEmitter {
     }, TIMING.EQUITY_TRACK_MS);
   }
 
-  // ===== EMERGENCY CONTROLS =====
   pause(reason) {
     this.#paused = true;
     this.#pauseReason = reason || 'Manual';
@@ -125,10 +122,8 @@ export class TradeManager extends EventEmitter {
     } catch (e) { this.#logger.error('Close last error'); }
   }
 
-  // ===== MAIN TRADING LOOP =====
   async #tick() {
     const now = this.#ts();
-
     try { await this.#monitor(); this.#reconnect = 0; }
     catch (e) {
       this.#logger.error('Monitor:', e.message);
@@ -142,13 +137,13 @@ export class TradeManager extends EventEmitter {
     }
 
     const session = this.#sessionFilter.check();
-    if (!session.trade) { return; }
+    if (!session.trade) return;
 
     const cooldownMs = (this.#strategyMode ? this.#strategyMode.getCooldownMinutes() : this.#config.risk.cooldownMinutes) * 60000;
-    if (Date.now() - this.#lastTradeTime < cooldownMs) { return; }
+    if (Date.now() - this.#lastTradeTime < cooldownMs) return;
 
     const can = await this.#riskEngine.canTrade();
-    if (!can.allowed) { return; }
+    if (!can.allowed) return;
 
     for (const pair of this.#config.pairs) {
       try { await this.#scanPair(pair, now); }
@@ -161,8 +156,7 @@ export class TradeManager extends EventEmitter {
       () => this.#exchange.fetchOHLCV(pair, this.#config.timeframes.primary, undefined, 200),
       { maxRetries: 2 }
     );
-
-    if (!ohlcv || ohlcv.length < 50) { return; }
+    if (!ohlcv || ohlcv.length < 50) return;
 
     const mf = await this.#marketFilter.check(ohlcv);
     if (!mf.trade) {
@@ -179,7 +173,7 @@ export class TradeManager extends EventEmitter {
     this.#lifecycle.signal(pair, signal);
     this.#logger.trade('[' + now + '] ' + pair + ' SIGNAL: ' + signal.side + ' | ' + signal.confidence + '%');
 
-    if (this.#deduplicator.isDuplicate(pair, signal.side)) { return; }
+    if (this.#deduplicator.isDuplicate(pair, signal.side)) return;
 
     const corr = this.#correlationChecker.check(pair, signal.side);
     if (!corr.allowed) {
@@ -221,12 +215,7 @@ export class TradeManager extends EventEmitter {
 
       if (obDecision === 'caution') { sz.quantity *= 0.5; sz.riskAmount *= 0.5; }
       if (sz.quantity <= 0 || sz.marginRequired > bal) { this.#logger.trade('Skip: sizing'); return; }
-
-      // FIX: Check minimum order size (most exchanges require min $5-10)
-      if (sz.quantity * entry < 5) {
-        this.#logger.trade('Skip: order too small ($' + (sz.quantity * entry).toFixed(2) + ')');
-        return;
-      }
+      if (sz.quantity * entry < 5) { this.#logger.trade('Skip: order too small'); return; }
 
       const id = 'T-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 8);
       const pos = {
@@ -247,7 +236,6 @@ export class TradeManager extends EventEmitter {
     } catch (e) { this.#logger.error('Execute:', e.message); }
   }
 
-  // ===== POSITION MONITORING =====
   async #monitor() {
     const t = this.#pm.getAll();
     if (!t.length) return;
@@ -299,7 +287,8 @@ export class TradeManager extends EventEmitter {
         this.#eventBus.emit('trade:partial_close', { ...pos, closePrice: price, closeQty, pnl: net, level: newIdx, remaining });
         this.#logger.trade('PTP#' + newIdx + ': ' + pos.id + ' | $' + net.toFixed(2));
 
-        if (newIdx === 1) {
+        // FIX: Move SL to break even after FIRST partial TP (not just PTP1)
+        if (newIdx >= 1) {
           this.#pm.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: true });
           this.#posRepo.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: 1 });
           this.#lifecycle.breakEven(pos.id, price);
@@ -315,25 +304,34 @@ export class TradeManager extends EventEmitter {
       return;
     }
 
-    // Break Even
+    // Break Even (even without PTP)
     if (!pos.break_even_applied && pos.break_even_price &&
         this.#riskEngine.shouldBreakEven(price, pos.entry_price, pos.break_even_price, pos.side)) {
       this.#pm.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: true });
       this.#posRepo.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: 1 });
       this.#lifecycle.breakEven(pos.id, price);
+      this.#logger.trade('BREAK EVEN: ' + pos.id + ' | SL moved to ' + pos.entry_price);
     }
 
-    // Trailing Stop
+    // Trailing Stop - FIX: Activate after 0.5R profit (not immediately)
     const atr = Math.abs(pos.entry_price - pos.stop_loss) / this.#config.indicators.atrSlMultiplier;
-    const ts = this.#riskEngine.getTrailingStop(price, atr, pos.side);
-    if (pos.trailing_stop && ((pos.side === 'long' && price <= pos.trailing_stop) || (pos.side === 'short' && price >= pos.trailing_stop))) {
-      this.#lifecycle.trailingStop(pos.id, price);
-      await this.#close(pos, price, 'trailing_stop', pnl);
-      return;
-    }
-    if (ts && (!pos.trailing_stop || (pos.side === 'long' && ts > pos.trailing_stop) || (pos.side === 'short' && ts < pos.trailing_stop))) {
-      this.#pm.update(pos.id, { trailing_stop: ts });
-      this.#posRepo.update(pos.id, { trailing_stop: ts });
+    const profitDistance = pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price;
+    const profitInR = atr > 0 ? profitDistance / atr : 0;
+
+    // Only activate trailing stop after 0.5R profit
+    if (profitInR >= 0.5) {
+      const ts = this.#riskEngine.getTrailingStop(price, atr, pos.side);
+      if (pos.trailing_stop) {
+        if ((pos.side === 'long' && price <= pos.trailing_stop) || (pos.side === 'short' && price >= pos.trailing_stop)) {
+          this.#lifecycle.trailingStop(pos.id, price);
+          await this.#close(pos, price, 'trailing_stop', pnl);
+          return;
+        }
+      }
+      if (ts && (!pos.trailing_stop || (pos.side === 'long' && ts > pos.trailing_stop) || (pos.side === 'short' && ts < pos.trailing_stop))) {
+        this.#pm.update(pos.id, { trailing_stop: ts });
+        this.#posRepo.update(pos.id, { trailing_stop: ts });
+      }
     }
   }
 
@@ -357,7 +355,6 @@ export class TradeManager extends EventEmitter {
     this.#logger.trade('CLOSED: ' + pos.id + ' | ' + reason + ' | $' + net.toFixed(2));
   }
 
-  // ===== HELPERS =====
   #calcPnl(pos, price) {
     return (pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price) * (pos.remaining_quantity || pos.quantity);
   }
@@ -366,7 +363,6 @@ export class TradeManager extends EventEmitter {
     return (pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price) * qty;
   }
 
-  // FIX: Validate price is a real number > 0
   #validatePrice(price) {
     if (!price || isNaN(price) || price <= 0) return null;
     return price;
