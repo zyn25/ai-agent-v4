@@ -1,12 +1,8 @@
-/**
- * Advanced performance analytics.
- */
 export class PerformanceAnalytics {
   #db; #logger;
   constructor(database, logger) { this.#db = database; this.#logger = logger; }
 
   getReport(days = 30) {
-    // FIX: Use simpler query that works with sql.js
     const trades = this.#db.prepare(
       "SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC"
     ).all();
@@ -27,26 +23,39 @@ export class PerformanceAnalytics {
     const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
     const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0;
 
+    // FIX: Max DD from starting balance, not from 0
+    const startingBalance = 10000;
+    let peak = startingBalance;
+    let maxDD = 0;
+    let maxDDPct = 0;
+    let running = startingBalance;
+
+    for (const pnl of pnls) {
+      running += pnl;
+      if (running > peak) peak = running;
+      const dd = peak - running;
+      const ddPct = peak > 0 ? (dd / peak) * 100 : 0;
+      if (ddPct > maxDDPct) {
+        maxDD = dd;
+        maxDDPct = ddPct;
+      }
+    }
+
+    // Sharpe
     const mean = totalPnl / trades.length;
     const variance = pnls.reduce((s, p) => s + Math.pow(p - mean, 2), 0) / pnls.length;
     const stdDev = Math.sqrt(variance);
     const sharpe = stdDev > 0 ? (mean / stdDev) * Math.sqrt(252) : 0;
 
+    // Sortino
     const negPnls = pnls.filter(p => p < 0);
     const downVar = negPnls.length ? negPnls.reduce((s, p) => s + p * p, 0) / negPnls.length : 0;
     const downDev = Math.sqrt(downVar);
     const sortino = downDev > 0 ? (mean / downDev) * Math.sqrt(252) : 0;
 
-    let peak = 0, maxDD = 0, maxDDPct = 0, running = 0;
-    for (const pnl of pnls) {
-      running += pnl;
-      if (running > peak) peak = running;
-      const dd = peak - running;
-      if (dd > maxDD) { maxDD = dd; maxDDPct = peak > 0 ? (dd / peak * 100) : 0; }
-    }
-
+    // Streaks
     let maxWinStreak = 0, maxLossStreak = 0, curWin = 0, curLoss = 0;
-    for (const t of trades) {
+    for (const t of [...trades].reverse()) {
       if (t.pnl > 0) { curWin++; curLoss = 0; maxWinStreak = Math.max(maxWinStreak, curWin); }
       else { curLoss++; curWin = 0; maxLossStreak = Math.max(maxLossStreak, curLoss); }
     }
