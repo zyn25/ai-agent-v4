@@ -70,8 +70,7 @@ export class TelegramService {
       'Decision:   <code>'+emoji+' '+(d.decision?.toUpperCase()||'N/A')+'</code>\n'+
       'Confidence: <code>'+confColor+' '+d.confidence+'%</code>\n'+
       'Reason:     <code>'+(d.reason||'N/A')+'</code>\n'+
-      'Latency:    <code>'+(d.latency||0)+'ms</code>\n'+
-      'Fallback:   <code>'+(d.fallback?'Yes':'No')+'</code>\n\n'+
+      'Latency:    <code>'+(d.latency||0)+'ms</code>\n\n'+
       '🕐 '+t;
   }
 
@@ -81,7 +80,9 @@ export class TelegramService {
     this.#bot.onText(/\/status/,async()=>this.#cmdStatus());
     this.#bot.onText(/\/positions/,async()=>this.#cmdPositions());
     this.#bot.onText(/\/balance/,()=>this.#cmdBalance());
-    this.#bot.onText(/\/trades/,()=>this.#cmdTrades());
+    this.#bot.onText(/\/trades/,()=>this.#cmdTrades(1));
+    this.#bot.onText(/\/trades2/,()=>this.#cmdTrades(2));
+    this.#bot.onText(/\/trades3/,()=>this.#cmdTrades(3));
     this.#bot.onText(/\/stats/,()=>this.#cmdStats());
     this.#bot.onText(/\/config/,()=>this.#cmdConfig());
     this.#bot.onText(/\/risk/,()=>this.#cmdRisk());
@@ -104,9 +105,80 @@ export class TelegramService {
   }
 
   #helpText() {
-    return '📋 <b>COMMANDS</b>\n\n📊 <b>Info:</b>\n/status /positions /balance /trades /stats /equity\n\n📈 <b>Analysis:</b>\n/orderbook /kelly /summary /analytics /journal\n\n⚙️ <b>Settings:</b>\n/config /risk /health /mode\n\n🎯 <b>Strategy:</b>\n/aggressive /balanced /conservative /scalping\n\n🚨 <b>Emergency:</b>\n/pause /resume /closeall /closelast';
+    return '📋 <b>COMMANDS</b>\n\n'+
+      '📊 <b>Info:</b>\n/status /positions /balance /trades /stats /equity\n\n'+
+      '📈 <b>Analysis:</b>\n/orderbook /kelly /summary /analytics /journal\n\n'+
+      '⚙️ <b>Settings:</b>\n/config /risk /health /mode\n\n'+
+      '🎯 <b>Strategy:</b>\n/aggressive /balanced /conservative /scalping\n\n'+
+      '🚨 <b>Emergency:</b>\n/pause /resume /closeall /closelast';
   }
 
+  // ===== PAGINATED TRADES =====
+  #cmdTrades(page = 1) {
+    const perPage = 5;
+    const offset = (page - 1) * perPage;
+
+    const total = this.#db.prepare(
+      "SELECT COUNT(*) as c FROM positions WHERE status IN ('open','closed')"
+    ).get().c;
+
+    const trades = this.#db.prepare(
+      "SELECT * FROM positions WHERE status IN ('open','closed') ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    ).all(perPage, offset);
+
+    if (!trades.length && page === 1) {
+      this.#send('📭 No trades yet');
+      return;
+    }
+
+    const totalPages = Math.ceil(total / perPage);
+    let m = '📋 <b>TRADES</b> (Page '+page+'/'+totalPages+')\n\n';
+
+    for (const t of trades) {
+      const emoji = t.status === 'open' ? '🟢' : (t.pnl > 0 ? '💰' : '💸');
+      const sign = t.pnl >= 0 ? '+' : '';
+      const holdStr = t.hold_duration ? this.#fmt.#duration(t.hold_duration) : 'Open';
+      const exitReason = t.exit_reason || 'open';
+      const status = t.status === 'open' ? 'OPEN' : exitReason.toUpperCase();
+
+      m += emoji+' <b>'+t.id+'</b>\n';
+      m += '   '+t.pair+' | '+t.side.toUpperCase()+'\n';
+      m += '   Entry: $'+this.#fmt.#fp(t.entry_price);
+      if (t.exit_price) m += ' → $'+this.#fmt.#fp(t.exit_price);
+      m += '\n';
+      m += '   PnL: '+sign+'$'+(t.pnl||0).toFixed(2);
+      if (t.roi) m += ' ('+sign+t.roi.toFixed(2)+'%)';
+      m += '\n';
+      m += '   '+status+' | '+holdStr+'\n\n';
+    }
+
+    // Summary
+    const wins = this.#db.prepare(
+      "SELECT COUNT(*) as c FROM positions WHERE status='closed' AND pnl>0"
+    ).get().c;
+    const losses = this.#db.prepare(
+      "SELECT COUNT(*) as c FROM positions WHERE status='closed' AND pnl<=0"
+    ).get().c;
+    const totalPnl = this.#db.prepare(
+      "SELECT COALESCE(SUM(pnl),0) as p FROM positions WHERE status='closed'"
+    ).get().p;
+
+    m += '─────────────────────\n';
+    m += '📊 <b>TOTAL</b>\n';
+    m += 'Trades: '+total+' | W: '+wins+' | L: '+losses+'\n';
+    m += 'PnL: '+(totalPnl>=0?'+':'')+'$'+totalPnl.toFixed(2)+'\n';
+
+    if (totalPages > 1) {
+      m += '\n📄 ';
+      if (page > 1) m += '/trades'+(page-1)+' ← ';
+      m += 'Page '+page+'/'+totalPages;
+      if (page < totalPages) m += ' → /trades'+(page+1);
+    }
+
+    this.#send(m);
+  }
+
+  // ===== DASHBOARD =====
   async #cmdStatus() {
     try {
       const p=this.#portRepo.getCurrent();
@@ -148,7 +220,7 @@ export class TelegramService {
         'Monthly:       <code>'+((p?.monthly_pnl||0)>=0?'+':'')+'$'+(p?.monthly_pnl||0).toFixed(2)+'</code>\n'+
         'DD:            <code>'+ddPct.toFixed(2)+'%</code>\n'+
         'Win Rate:      <code>'+(p?.win_rate||0).toFixed(1)+'%</code>\n'+
-        'Profit Factor: <code>'+pf+'</code>\n'+
+        'PF:            <code>'+pf+'</code>\n'+
         'Avg Hold:      <code>'+avgHoldH+'</code>\n'+
         'Open:          <code>'+(pos?pos.length:0)+'</code>\n'+
         'CPU:           <code>'+cpu+'%</code>\n'+
@@ -173,14 +245,6 @@ export class TelegramService {
     const p=this.#portRepo.getCurrent();
     if(!p){this.#send('No data');return;}
     this.#send('💰 <b>BALANCE</b>\n\nBalance: $'+p.balance.toFixed(2)+'\nEquity: $'+p.equity.toFixed(2)+'\nRealized: $'+p.realized_pnl.toFixed(2)+'\nPeak: $'+(p.peak_balance||p.balance).toFixed(2));
-  }
-
-  // FIX: Better trade history format
-  #cmdTrades() {
-    const trades = this.#db.prepare(
-      "SELECT * FROM positions WHERE status IN ('open','closed') ORDER BY created_at DESC LIMIT 10"
-    ).all();
-    this.#send(this.#fmt.formatTradeHistory(trades));
   }
 
   #cmdStats() {
