@@ -1,6 +1,6 @@
 /**
  * Circuit breaker for loss limits and trading pauses.
- * FIX: Daily reset based on date change, not exact midnight minute.
+ * FIX: Consecutive losses count from TODAY only, not all-time.
  */
 export class CircuitBreaker {
   #config; #logger; #db;
@@ -57,24 +57,23 @@ export class CircuitBreaker {
       }
     }
 
-    // Balance floor check (FIX: stop trading if balance < 50% of starting)
+    // Balance floor check
     const startingBalance = this.#config.trading.startingBalance;
     if (p.balance < startingBalance * 0.5) {
       this.#pause('Balance below 50% ($' + p.balance.toFixed(2) + ')');
       return { allowed: false, reason: 'Balance critically low' };
     }
 
-    // Consecutive losses check
-    const consecutive = this.#getConsecutiveLosses();
+    // FIX: Consecutive losses from TODAY only
+    const consecutive = this.#getConsecutiveLossesToday();
     if (consecutive >= this.#config.risk.maxConsecutiveLosses) {
-      this.#pause('Consecutive losses (' + consecutive + ')');
+      this.#pause('Consecutive losses today (' + consecutive + ')');
       return { allowed: false, reason: 'Max consecutive losses: ' + consecutive };
     }
 
     return { allowed: true };
   }
 
-  // FIX: Daily reset based on date change, not exact midnight
   #autoResetDaily() {
     const today = new Date().toDateString();
     if (this.#lastResetDate !== today) {
@@ -83,12 +82,12 @@ export class CircuitBreaker {
         this.#db.prepare("UPDATE portfolio SET daily_pnl = 0, updated_at = datetime('now')").run();
         this.#logger.info('Daily PnL reset');
 
-        // Resume if paused for daily loss
-        if (this.#paused && this.#reason && this.#reason.includes('Daily')) {
+        // FIX: Always resume after daily reset
+        if (this.#paused) {
           this.#paused = false;
           this.#reason = '';
           this.#pauseTime = null;
-          this.#logger.info('Circuit breaker auto-resumed after daily reset');
+          this.#logger.info('Circuit breaker RESUMED after daily reset');
         }
       } catch (e) {
         this.#logger.error('Daily reset error:', e.message);
@@ -97,9 +96,10 @@ export class CircuitBreaker {
   }
 
   async recordLoss() {
-    const consecutive = this.#getConsecutiveLosses();
+    // FIX: Check consecutive losses from TODAY only
+    const consecutive = this.#getConsecutiveLossesToday();
     if (consecutive >= this.#config.risk.maxConsecutiveLosses) {
-      this.#pause('Consecutive losses (' + consecutive + ')');
+      this.#pause('Consecutive losses today (' + consecutive + ')');
     }
   }
 
@@ -109,6 +109,23 @@ export class CircuitBreaker {
       this.#logger.info('Daily PnL reset (manual)');
     } catch (e) {
       this.#logger.error('Manual reset error:', e.message);
+    }
+  }
+
+  // FIX: Count consecutive losses from TODAY only
+  #getConsecutiveLossesToday() {
+    try {
+      const trades = this.#db.prepare(
+        "SELECT pnl FROM positions WHERE status = 'closed' AND date(close_time) = date('now') ORDER BY close_time DESC LIMIT 20"
+      ).all();
+      let count = 0;
+      for (const t of trades) {
+        if (t.pnl <= 0) count++;
+        else break;
+      }
+      return count;
+    } catch {
+      return 0;
     }
   }
 
@@ -129,22 +146,6 @@ export class CircuitBreaker {
     const pauseDate = new Date(this.#pauseTime).toDateString();
     const today = new Date().toDateString();
     return pauseDate !== today;
-  }
-
-  #getConsecutiveLosses() {
-    try {
-      const trades = this.#db.prepare(
-        "SELECT pnl FROM positions WHERE status = 'closed' ORDER BY close_time DESC LIMIT 20"
-      ).all();
-      let count = 0;
-      for (const t of trades) {
-        if (t.pnl <= 0) count++;
-        else break;
-      }
-      return count;
-    } catch {
-      return 0;
-    }
   }
 
   get isPaused() { return this.#paused; }
