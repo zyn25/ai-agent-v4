@@ -1,17 +1,11 @@
 import { PositionSizer } from './PositionSizer.js';
 import { CircuitBreaker } from './CircuitBreaker.js';
 
-/**
- * Risk engine - handles all risk calculations.
- * FIX: Tighter trailing stop, faster break even, earlier partial TP.
- */
 export class RiskEngine {
   #config; #logger; #db; #breaker; #sizer;
 
   constructor(config, logger, db) {
-    this.#config = config;
-    this.#logger = logger;
-    this.#db = db;
+    this.#config = config; this.#logger = logger; this.#db = db;
     this.#breaker = new CircuitBreaker(config, logger, db);
     this.#sizer = new PositionSizer(config);
   }
@@ -19,12 +13,8 @@ export class RiskEngine {
   async canTrade() {
     const b = await this.#breaker.check();
     if (!b.allowed) return b;
-    const o = this.#db.prepare(
-      "SELECT COUNT(*) as c FROM positions WHERE status='open'"
-    ).get();
-    if ((o?.c || 0) >= this.#config.risk.maxOpenPositions) {
-      return { allowed: false, reason: 'Max positions reached' };
-    }
+    const o = this.#db.prepare("SELECT COUNT(*) as c FROM positions WHERE status='open'").get();
+    if ((o?.c || 0) >= this.#config.risk.maxOpenPositions) return { allowed: false, reason: 'Max positions' };
     return { allowed: true };
   }
 
@@ -42,7 +32,22 @@ export class RiskEngine {
     const be = side === 'long'
       ? entry + atr * this.#config.risk.breakEvenTrigger
       : entry - atr * this.#config.risk.breakEvenTrigger;
-    return { stopLoss: sl, takeProfit: tp, breakEven: be };
+
+    // IMPROVED: Ensure minimum 1:2 risk/reward
+    const risk = Math.abs(entry - sl);
+    const reward = Math.abs(tp - entry);
+    const rr = reward / risk;
+
+    let adjustedTp = tp;
+    if (rr < 2.0) {
+      // Force minimum 1:2 R:R
+      adjustedTp = side === 'long'
+        ? entry + risk * 2.0
+        : entry - risk * 2.0;
+      this.#logger.trade('TP adjusted for 1:2 R:R: ' + tp.toFixed(2) + ' → ' + adjustedTp.toFixed(2));
+    }
+
+    return { stopLoss: sl, takeProfit: adjustedTp, breakEven: be };
   }
 
   shouldBreakEven(cur, entry, be, side) {
@@ -50,39 +55,21 @@ export class RiskEngine {
     return side === 'long' ? cur >= be : cur <= be;
   }
 
-  /**
-   * FIX: Much tighter trailing stop.
-   * Uses 1.0x ATR instead of 2.0x
-   * Also checks if price moved enough before activating trail
-   */
   getTrailingStop(cur, atr, side) {
     if (!cur || !atr) return null;
     const d = atr * this.#config.risk.trailingStopATR;
     return side === 'long' ? cur - d : cur + d;
   }
 
-  /**
-   * FIX: Earlier partial TP with better distribution
-   */
   shouldPartialTP(currentPrice, entryPrice, side, currentIndex) {
     const levels = this.#config.risk.partialTpLevels;
     const sizes = this.#config.risk.partialTpSizes;
     if (currentIndex >= levels.length) return null;
-
     const targetRR = levels[currentIndex];
-    const distance = side === 'long'
-      ? currentPrice - entryPrice
-      : entryPrice - currentPrice;
-    const riskDistance = Math.abs(entryPrice - (side === 'long'
-      ? entryPrice - distance
-      : entryPrice + distance));
-    const currentRR = riskDistance > 0
-      ? Math.abs(distance / entryPrice) * 100
-      : 0;
-
-    if (currentRR >= targetRR) {
-      return { level: currentIndex, sizePercent: sizes[currentIndex], rr: currentRR };
-    }
+    const distance = side === 'long' ? currentPrice - entryPrice : entryPrice - currentPrice;
+    const riskDistance = Math.abs(entryPrice - (side === 'long' ? entryPrice - distance : entryPrice + distance));
+    const currentRR = riskDistance > 0 ? Math.abs(distance / entryPrice) * 100 : 0;
+    if (currentRR >= targetRR) return { level: currentIndex, sizePercent: sizes[currentIndex], rr: currentRR };
     return null;
   }
 

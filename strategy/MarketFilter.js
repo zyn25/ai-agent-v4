@@ -16,117 +16,72 @@ export class MarketFilter {
     const lows = ohlcv.map(c => c[3]);
     const volumes = ohlcv.map(c => c[5]);
 
-    // Volume check - very lenient (only block zero volume)
+    // Volume check
     const volResult = this.#checkVolume(volumes);
-    if (!volResult.pass) {
-      return { trade: false, reason: volResult.reason, score: 0 };
-    }
+    if (!volResult.pass) return { trade: false, reason: volResult.reason, score: 0 };
 
-    // Ranging check
+    // ATR volatility check - IMPROVED
+    const atrResult = this.#checkVolatility(highs, lows, closes);
+    if (!atrResult.pass) return { trade: false, reason: atrResult.reason, score: 0 };
+
+    // Ranging market check - IMPROVED
     const rangeResult = this.#checkRanging(closes, highs, lows);
-    if (!rangeResult.pass) {
-      return { trade: false, reason: rangeResult.reason, score: 0 };
-    }
+    if (!rangeResult.pass) return { trade: false, reason: rangeResult.reason, score: 0 };
 
-    // Volatility check
-    const volatResult = this.#checkVolatility(highs, lows, closes);
-    if (!volatResult.pass) {
-      return { trade: false, reason: volatResult.reason, score: 0 };
-    }
-
-    const trendResult = this.#checkTrendStrength(closes);
-    const totalScore = (volResult.score + rangeResult.score + volatResult.score + trendResult.score) / 4;
-
-    return { trade: true, reason: 'Market OK', score: totalScore };
+    return { trade: true, reason: 'Market OK', score: 50 };
   }
 
   #checkVolume(volumes) {
     const vol = VolumeIndicator.calculate(volumes);
     const ratio = vol.ratio;
-
-    // Only block truly dead markets (no volume at all)
     if (ratio < 0.01 || isNaN(ratio)) {
-      return { pass: false, reason: 'No volume (ratio: ' + ratio?.toFixed(4) + ')', score: 0, ratio };
+      return { pass: false, reason: 'No volume', score: 0 };
     }
-
-    // Always pass - just score for quality
-    let score = 30;
-    if (ratio >= 2.0) score = 100;
-    else if (ratio >= 1.5) score = 90;
-    else if (ratio >= 1.0) score = 80;
-    else if (ratio >= 0.5) score = 60;
-    else if (ratio >= 0.1) score = 40;
-
-    return { pass: true, reason: 'Volume OK (ratio: ' + ratio.toFixed(4) + ')', score, ratio };
+    return { pass: true, reason: 'Volume OK', score: 50, ratio };
   }
 
-  #checkRanging(closes, highs, lows) {
-    const atr = ATRIndicator.calculate(highs, lows, closes, 14);
-    if (!atr.length) return { pass: true, reason: 'No ATR data', score: 50 };
-
-    const currentATR = atr[atr.length - 1];
-    const currentPrice = closes[closes.length - 1];
-    const atrPercent = (currentATR / currentPrice) * 100;
-
-    const recentHighs = highs.slice(-20);
-    const recentLows = lows.slice(-20);
-    const highest = Math.max(...recentHighs);
-    const lowest = Math.min(...recentLows);
-    const range = ((highest - lowest) / lowest) * 100;
-
-    const ema20 = EMAIndicator.calculate(closes, 20);
-    const ema50 = EMAIndicator.calculate(closes, 50);
-    let emaSpread = 0;
-    if (ema20.length > 0 && ema50.length > 0) {
-      emaSpread = Math.abs(ema20[ema20.length - 1] - ema50[ema50.length - 1]) / currentPrice * 100;
-    }
-
-    // Only block dead markets
-    if (atrPercent < 0.05 && range < 0.3 && emaSpread < 0.02) {
-      return { pass: false, reason: 'Dead market (ATR: ' + atrPercent.toFixed(3) + '%)', score: 0 };
-    }
-
-    let score = 50;
-    if (atrPercent > 1.0) score = 90;
-    else if (atrPercent > 0.5) score = 70;
-    else if (atrPercent > 0.2) score = 60;
-
-    return { pass: true, reason: 'Market active (ATR: ' + atrPercent.toFixed(2) + '%)', score };
-  }
-
+  // IMPROVED: Block market with ATR too low (choppy)
   #checkVolatility(highs, lows, closes) {
     const atr = ATRIndicator.calculate(highs, lows, closes, 14);
-    if (!atr.length) return { pass: true, reason: 'No data', score: 50 };
+    if (!atr || !atr.length) return { pass: true, reason: 'No ATR', score: 50 };
 
     const currentATR = atr[atr.length - 1];
-    const avgATR = atr.reduce((s, v) => s + v, 0) / atr.length;
-    const volatilityRatio = currentATR / avgATR;
+    const price = closes[closes.length - 1];
+    const atrPct = (currentATR / price) * 100;
 
-    // Only block extreme spikes
-    if (volatilityRatio > 5.0) {
-      return { pass: false, reason: 'Extreme spike (ratio: ' + volatilityRatio.toFixed(2) + ')', score: 0 };
+    // Block if ATR < 0.15% (too quiet, will get stopped out easily)
+    if (atrPct < 0.15) {
+      return { pass: false, reason: 'ATR too low (' + atrPct.toFixed(3) + '%)', score: 0 };
     }
 
-    let score = 50;
-    if (volatilityRatio >= 0.8 && volatilityRatio <= 1.5) score = 90;
-    else if (volatilityRatio >= 0.5 && volatilityRatio <= 2.0) score = 70;
+    // Block if ATR > 5% (extreme volatility, dangerous)
+    if (atrPct > 5.0) {
+      return { pass: false, reason: 'ATR too high (' + atrPct.toFixed(1) + '%)', score: 0 };
+    }
 
-    return { pass: true, reason: 'Volatility OK (ratio: ' + volatilityRatio.toFixed(2) + ')', score };
+    return { pass: true, reason: 'ATR OK (' + atrPct.toFixed(2) + '%)', score: 50 };
   }
 
-  #checkTrendStrength(closes) {
-    const ema20 = EMAIndicator.calculate(closes, 20);
-    const ema50 = EMAIndicator.calculate(closes, 50);
-    const ema100 = EMAIndicator.calculate(closes, 100);
+  // IMPROVED: Better ranging detection
+  #checkRanging(closes, highs, lows) {
+    const atr = ATRIndicator.calculate(highs, lows, closes, 14);
+    if (!atr || !atr.length) return { pass: true, reason: 'No data', score: 50 };
 
-    if (ema20.length < 2 || ema50.length < 2 || ema100.length < 2) return { score: 50 };
+    const currentATR = atr[atr.length - 1];
+    const price = closes[closes.length - 1];
+    const atrPct = (currentATR / price) * 100;
 
-    const e20 = ema20[ema20.length - 1];
-    const e50 = ema50[ema50.length - 1];
-    const e100 = ema100[ema100.length - 1];
+    // Check price movement vs ATR
+    const last20 = closes.slice(-20);
+    const high20 = Math.max(...last20);
+    const low20 = Math.min(...last20);
+    const range20 = ((high20 - low20) / low20) * 100;
 
-    if ((e20 > e50 && e50 > e100) || (e20 < e50 && e50 < e100)) return { score: 100, alignment: 'perfect' };
-    if (e20 > e50 || e20 < e50) return { score: 60, alignment: 'partial' };
-    return { score: 30, alignment: 'none' };
+    // If range is less than 2x ATR, market is ranging
+    if (range20 < atrPct * 2) {
+      return { pass: false, reason: 'Ranging (range:' + range20.toFixed(2) + '% < 2x ATR)', score: 0 };
+    }
+
+    return { pass: true, reason: 'Trending OK', score: 50 };
   }
 }
