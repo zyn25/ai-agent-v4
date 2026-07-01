@@ -192,7 +192,7 @@ export class TradeManager extends EventEmitter {
       this.#logger.trade('[' + now + '] ' + pair + ' AI validating...');
 
       const aiStart = Date.now();
-      ai = await this.#aiValidator.validate(signal);
+      ai = await this.#aiValidator.validate(signal, this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : undefined);
       const aiLatency = Date.now() - aiStart;
 
       // FIX: Emit AI event to Telegram

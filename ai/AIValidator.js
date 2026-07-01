@@ -1,14 +1,9 @@
 import { PromptBuilder } from './PromptBuilder.js';
 import { ResponseParser } from './ResponseParser.js';
 
-/**
- * AI signal validator.
- * Returns: Approve/Reject/Wait with all required fields.
- * CRITICAL FIX: Fallback to REJECT when AI unavailable (not approve).
- * Master prompt: "Fallback to indicator-only mode" = higher threshold, not skip filter.
- */
 export class AIValidator {
-  #config; #logger; #promptBuilder; #responseParser; #cache; #cacheTTL; #failCount; #maxFails;
+  #config; #logger; #promptBuilder; #responseParser;
+  #cache; #cacheTTL; #failCount; #maxFails;
 
   constructor(config, logger) {
     this.#config = config;
@@ -21,19 +16,25 @@ export class AIValidator {
     this.#maxFails = 3;
   }
 
-  async validate(signal) {
+  async validate(signal, strategyThreshold) {
     if (!this.#config.ai.enabled) {
-      return this.#indicatorOnly(signal);
+      // FIX: Use strategy threshold, not AI config threshold
+      return this.#indicatorOnly(signal, strategyThreshold);
     }
 
     const cacheKey = this.#getCacheKey(signal);
     const cached = this.#getFromCache(cacheKey);
     if (cached) return cached;
 
-    // FIX: If too many consecutive failures, reject instead of approve
+    // FIX: After max failures, reject instead of approve
     if (this.#failCount >= this.#maxFails) {
-      this.#logger.warn('AI unavailable (' + this.#failCount + ' failures). Using indicator-only mode.');
-      return this.#indicatorOnly(signal);
+      this.#logger.warn('AI unavailable (' + this.#failCount + ' fails). Using REJECT mode.');
+      return {
+        decision: 'reject',
+        confidence: signal.confidence,
+        reason: 'AI unavailable - REJECT for safety',
+        fallback: true,
+      };
     }
 
     try {
@@ -43,7 +44,7 @@ export class AIValidator {
       const latency = Date.now() - startTime;
 
       const result = this.#responseParser.parse(response);
-      this.#failCount = 0; // Reset on success
+      this.#failCount = 0;
 
       this.#logger.ai(
         'AI: ' + result.decision + ' | ' + result.confidence + '% | ' + result.reason + ' | ' + latency + 'ms'
@@ -55,13 +56,17 @@ export class AIValidator {
       this.#failCount++;
       this.#logger.error('AI failed (' + this.#failCount + '/' + this.#maxFails + '): ' + error.message);
 
-      // FIX: After max failures, use indicator-only mode (reject low confidence)
+      // FIX: After max failures, REJECT
       if (this.#failCount >= this.#maxFails) {
-        this.#logger.warn('AI circuit breaker triggered. Using indicator-only mode.');
-        return this.#indicatorOnly(signal);
+        return {
+          decision: 'reject',
+          confidence: signal.confidence,
+          reason: 'AI unavailable - REJECT for safety',
+          fallback: true,
+        };
       }
 
-      // For first failures, still try to proceed but with reduced confidence
+      // FIX: First failures = REJECT (not approve)
       return {
         decision: 'reject',
         confidence: 0,
@@ -71,12 +76,9 @@ export class AIValidator {
     }
   }
 
-  /**
-   * Indicator-only mode: require higher confidence when AI is unavailable.
-   * Master prompt: "Fallback to indicator-only mode if AI unavailable"
-   */
-  #indicatorOnly(signal) {
-    const threshold = this.#config.ai.confidenceThreshold || 70;
+  // FIX: Use strategy threshold, not AI config threshold
+  #indicatorOnly(signal, strategyThreshold) {
+    const threshold = strategyThreshold || this.#config.ai.confidenceThreshold || 70;
     const approved = signal.confidence >= threshold;
 
     return {
@@ -84,7 +86,7 @@ export class AIValidator {
       confidence: signal.confidence,
       reason: approved
         ? 'Indicator-only: ' + signal.confidence + '% >= ' + threshold + '%'
-        : 'Indicator-only: ' + signal.confidence + '% < ' + threshold + '% (need ' + threshold + '%)',
+        : 'Indicator-only: ' + signal.confidence + '% < ' + threshold + '%',
       riskLevel: signal.confidence >= 80 ? 'low' : signal.confidence >= 60 ? 'medium' : 'high',
       trendStrength: signal.confidence >= 80 ? 'strong' : signal.confidence >= 60 ? 'moderate' : 'weak',
       momentum: signal.side === 'long' ? 'bullish' : 'bearish',
