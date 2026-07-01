@@ -3,10 +3,7 @@ export class ReportService {
   #lastDaily; #lastWeekly; #lastMonthly;
 
   constructor(config, logger, db, tg) {
-    this.#config = config;
-    this.#logger = logger;
-    this.#db = db;
-    this.#telegram = tg;
+    this.#config = config; this.#logger = logger; this.#db = db; this.#telegram = tg;
     this.#intervals = [];
     this.#lastDaily = null;
     this.#lastWeekly = null;
@@ -18,7 +15,6 @@ export class ReportService {
       const n = new Date();
       const today = n.toDateString();
 
-      // Daily at midnight
       if (n.getHours() === 0 && n.getMinutes() === 0) {
         if (this.#lastDaily !== today) {
           this.#lastDaily = today;
@@ -26,7 +22,6 @@ export class ReportService {
         }
       }
 
-      // Weekly on Sunday at midnight
       if (n.getDay() === 0 && n.getHours() === 0 && n.getMinutes() === 0) {
         if (this.#lastWeekly !== today) {
           this.#lastWeekly = today;
@@ -34,7 +29,6 @@ export class ReportService {
         }
       }
 
-      // Monthly on 1st at midnight
       if (n.getDate() === 1 && n.getHours() === 0 && n.getMinutes() === 0) {
         if (this.#lastMonthly !== today) {
           this.#lastMonthly = today;
@@ -47,32 +41,67 @@ export class ReportService {
 
   async #daily() {
     try {
-      const r = this.#getStats(1);
-      const t = this.#ts();
+      // FIX: Get all closed trades from yesterday using date comparison
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yDate = yesterday.toISOString().substring(0, 10);
+
+      const trades = this.#db.prepare(
+        "SELECT * FROM positions WHERE status='closed'"
+      ).all();
+
+      // Filter by date in JavaScript (more reliable than SQLite date functions)
+      const dayTrades = trades.filter(t => {
+        if (!t.close_time) return false;
+        return t.close_time.substring(0, 10) === yDate;
+      });
+
+      const wins = dayTrades.filter(t => t.pnl > 0);
+      const losses = dayTrades.filter(t => t.pnl <= 0);
+      const totalPnl = dayTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+      const wr = dayTrades.length > 0 ? ((wins.length / dayTrades.length) * 100).toFixed(1) : '0.0';
+      const t = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
       await this.#telegram.sendReport(
-        '📊 <b>DAILY REPORT</b>\n\n' +
-        'Trades: ' + r.total + '\n' +
-        'Wins: ' + r.wins + ' | Losses: ' + r.losses + '\n' +
-        'Win Rate: ' + r.winRate + '%\n' +
-        'PnL: $' + r.totalPnl.toFixed(2) + '\n' +
-        'Best: $' + r.best.toFixed(2) + '\n' +
-        'Worst: $' + r.worst.toFixed(2) + '\n\n' +
+        '📊 <b>DAILY REPORT</b> (' + yDate + ')\n\n' +
+        'Trades: ' + dayTrades.length + '\n' +
+        'Wins: ' + wins.length + ' | Losses: ' + losses.length + '\n' +
+        'Win Rate: ' + wr + '%\n' +
+        'PnL: ' + (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + '\n\n' +
         '🕐 ' + t
       );
+
+      this.#logger.info('Daily report sent: ' + dayTrades.length + ' trades');
     } catch (e) { this.#logger.error('Daily report:', e.message); }
   }
 
   async #weekly() {
     try {
-      const r = this.#getStats(7);
-      const t = this.#ts();
+      const weekAgo = new Date();
+      weekAgo.setDate(weekAgo.getDate() - 7);
+      const wDate = weekAgo.toISOString().substring(0, 10);
+
+      const trades = this.#db.prepare(
+        "SELECT * FROM positions WHERE status='closed'"
+      ).all();
+
+      const weekTrades = trades.filter(t => {
+        if (!t.close_time) return false;
+        return t.close_time.substring(0, 10) >= wDate;
+      });
+
+      const wins = weekTrades.filter(t => t.pnl > 0);
+      const losses = weekTrades.filter(t => t.pnl <= 0);
+      const totalPnl = weekTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+      const wr = weekTrades.length > 0 ? ((wins.length / weekTrades.length) * 100).toFixed(1) : '0.0';
+      const t = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
       await this.#telegram.sendReport(
         '📊 <b>WEEKLY REPORT</b>\n\n' +
-        'Trades: ' + r.total + '\n' +
-        'Wins: ' + r.wins + ' | Losses: ' + r.losses + '\n' +
-        'Win Rate: ' + r.winRate + '%\n' +
-        'PnL: $' + r.totalPnl.toFixed(2) + '\n' +
-        'Avg: $' + r.avgPnl.toFixed(2) + '\n\n' +
+        'Trades: ' + weekTrades.length + '\n' +
+        'Wins: ' + wins.length + ' | Losses: ' + losses.length + '\n' +
+        'Win Rate: ' + wr + '%\n' +
+        'PnL: ' + (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + '\n\n' +
         '🕐 ' + t
       );
     } catch (e) { this.#logger.error('Weekly report:', e.message); }
@@ -80,42 +109,35 @@ export class ReportService {
 
   async #monthly() {
     try {
-      const r = this.#getStats(30);
-      const t = this.#ts();
+      const monthAgo = new Date();
+      monthAgo.setDate(monthAgo.getDate() - 30);
+      const mDate = monthAgo.toISOString().substring(0, 10);
+
+      const trades = this.#db.prepare(
+        "SELECT * FROM positions WHERE status='closed'"
+      ).all();
+
+      const monthTrades = trades.filter(t => {
+        if (!t.close_time) return false;
+        return t.close_time.substring(0, 10) >= mDate;
+      });
+
+      const wins = monthTrades.filter(t => t.pnl > 0);
+      const losses = monthTrades.filter(t => t.pnl <= 0);
+      const totalPnl = monthTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+      const wr = monthTrades.length > 0 ? ((wins.length / monthTrades.length) * 100).toFixed(1) : '0.0';
+      const t = new Date().toISOString().replace('T', ' ').substring(0, 19);
+
       await this.#telegram.sendReport(
         '📊 <b>MONTHLY REPORT</b>\n\n' +
-        'Trades: ' + r.total + '\n' +
-        'Wins: ' + r.wins + ' | Losses: ' + r.losses + '\n' +
-        'Win Rate: ' + r.winRate + '%\n' +
-        'PnL: $' + r.totalPnl.toFixed(2) + '\n' +
-        'Best: $' + r.best.toFixed(2) + '\n' +
-        'Worst: $' + r.worst.toFixed(2) + '\n' +
-        'Avg: $' + r.avgPnl.toFixed(2) + '\n\n' +
+        'Trades: ' + monthTrades.length + '\n' +
+        'Wins: ' + wins.length + ' | Losses: ' + losses.length + '\n' +
+        'Win Rate: ' + wr + '%\n' +
+        'PnL: ' + (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toFixed(2) + '\n\n' +
         '🕐 ' + t
       );
     } catch (e) { this.#logger.error('Monthly report:', e.message); }
   }
-
-  #getStats(days) {
-    const rows = this.#db.prepare(
-      "SELECT * FROM positions WHERE status='closed' AND close_time >= datetime('now', '-' + ? + ' days')"
-    ).all(days);
-    const wins = rows.filter(r => r.pnl > 0);
-    const losses = rows.filter(r => r.pnl <= 0);
-    const totalPnl = rows.reduce((s, r) => s + r.pnl, 0);
-    return {
-      total: rows.length,
-      wins: wins.length,
-      losses: losses.length,
-      winRate: rows.length > 0 ? ((wins.length / rows.length) * 100).toFixed(1) : '0.0',
-      totalPnl,
-      avgPnl: rows.length > 0 ? totalPnl / rows.length : 0,
-      best: rows.length > 0 ? Math.max(...rows.map(r => r.pnl)) : 0,
-      worst: rows.length > 0 ? Math.min(...rows.map(r => r.pnl)) : 0,
-    };
-  }
-
-  #ts() { return new Date().toISOString().replace('T', ' ').substring(0, 19); }
 
   stop() { this.#intervals.forEach(i => clearInterval(i)); this.#intervals = []; }
 }
