@@ -5,7 +5,12 @@ export class EventBus extends EventEmitter {
     this.setMaxListeners(maxListeners);
   }
   safeEmit(event, ...args) {
-    try { return this.emit(event, ...args); }
-    catch (error) { this.emit('error', { event, error }); return false; }
+    try {
+      const hasListeners = this.listenerCount(event) > 0;
+      if (!hasListeners) return false;
+      return this.emit(event, ...args);
+    } catch (error) {
+      return false;
+    }
   }
 }
