@@ -3,6 +3,7 @@ import { PositionRepository } from '../database/repositories/PositionRepository.
 import { PortfolioRepository } from '../database/repositories/PortfolioRepository.js';
 import { OrderbookAnalyzer } from '../strategy/OrderbookAnalyzer.js';
 import { MarketFilter } from '../strategy/MarketFilter.js';
+import { MarketStructure } from '../strategy/MarketStructure.js';
 import { SessionFilter } from '../strategy/SessionFilter.js';
 import { CorrelationChecker } from '../strategy/CorrelationChecker.js';
 import { OrderDeduplicator } from './OrderDeduplicator.js';
@@ -13,7 +14,7 @@ import { EventEmitter } from 'events';
 
 export class TradeManager extends EventEmitter {
   #config; #logger; #db; #exchange; #signalEngine; #riskEngine; #aiValidator; #eventBus;
-  #pm; #posRepo; #portRepo; #orderbook; #marketFilter; #sessionFilter;
+  #pm; #posRepo; #portRepo; #orderbook; #marketFilter; #marketStructure; #sessionFilter;
   #correlationChecker; #deduplicator; #strategyMode; #lifecycle;
   #running = false; #loop = null; #reconnect = 0;
   #paused = false; #pauseReason = ''; #lastTradeTime = 0;
@@ -28,6 +29,7 @@ export class TradeManager extends EventEmitter {
     this.#portRepo = new PortfolioRepository(db);
     this.#orderbook = new OrderbookAnalyzer(ex, l);
     this.#marketFilter = new MarketFilter(c, l);
+    this.#marketStructure = new MarketStructure(c, l);
     this.#sessionFilter = new SessionFilter(c, l);
     this.#correlationChecker = new CorrelationChecker(db, l);
     this.#deduplicator = new OrderDeduplicator(c);
@@ -64,30 +66,14 @@ export class TradeManager extends EventEmitter {
         const equity = p.balance + unrealized;
         const peak = Math.max(p.peak_balance || p.balance, equity);
         const dd = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
-        this.#db.prepare(
-          'INSERT INTO equity_curve (balance, equity, drawdown, drawdown_pct, peak_balance, open_positions) VALUES (?, ?, ?, ?, ?, ?)'
-        ).run(p.balance, equity, peak - equity, dd, peak, open.length);
-        this.#db.prepare(
-          "DELETE FROM equity_curve WHERE created_at < datetime('now', '-7 days')"
-        ).run();
+        this.#db.prepare('INSERT INTO equity_curve (balance, equity, drawdown, drawdown_pct, peak_balance, open_positions) VALUES (?, ?, ?, ?, ?, ?)').run(p.balance, equity, peak - equity, dd, peak, open.length);
+        this.#db.prepare("DELETE FROM equity_curve WHERE created_at < datetime('now', '-7 days')").run();
       } catch (e) {}
     }, TIMING.EQUITY_TRACK_MS);
   }
 
-  pause(reason) {
-    this.#paused = true;
-    this.#pauseReason = reason || 'Manual';
-    this.#logger.warn('PAUSED: ' + this.#pauseReason);
-    this.#eventBus.emit('trade:paused', { reason: this.#pauseReason });
-  }
-
-  resume() {
-    this.#paused = false;
-    this.#pauseReason = '';
-    this.#logger.info('RESUMED');
-    this.#eventBus.emit('trade:resumed', {});
-  }
-
+  pause(reason) { this.#paused = true; this.#pauseReason = reason || 'Manual'; this.#logger.warn('PAUSED: ' + this.#pauseReason); this.#eventBus.emit('trade:paused', { reason: this.#pauseReason }); }
+  resume() { this.#paused = false; this.#pauseReason = ''; this.#logger.info('RESUMED'); this.#eventBus.emit('trade:resumed', {}); }
   get isPaused() { return this.#paused; }
   get pauseReason() { return this.#pauseReason; }
 
@@ -125,11 +111,7 @@ export class TradeManager extends EventEmitter {
     catch (e) {
       this.#logger.error('Monitor:', e.message);
       this.#reconnect++;
-      if (this.#reconnect >= 5) {
-        this.#logger.error('Exchange down. Pause 5min.');
-        await this.#sleep(300000);
-        this.#reconnect = 0;
-      }
+      if (this.#reconnect >= 5) { this.#logger.error('Exchange down. Pause 5min.'); await this.#sleep(300000); this.#reconnect = 0; }
       return;
     }
 
@@ -156,16 +138,10 @@ export class TradeManager extends EventEmitter {
     if (!ohlcv || ohlcv.length < 50) return;
 
     const mf = await this.#marketFilter.check(ohlcv);
-    if (!mf.trade) {
-      this.#logger.trade('[' + now + '] ' + pair + ' FILTERED: ' + mf.reason);
-      return;
-    }
+    if (!mf.trade) { this.#logger.trade('[' + now + '] ' + pair + ' FILTERED: ' + mf.reason); return; }
 
     const signal = await this.#signalEngine.analyze(pair);
-    if (signal.side === 'neutral') {
-      this.#logger.trade('[' + now + '] ' + pair + ' no signal (' + signal.reason + ')');
-      return;
-    }
+    if (signal.side === 'neutral') { this.#logger.trade('[' + now + '] ' + pair + ' no signal (' + signal.reason + ')'); return; }
 
     this.#lifecycle.signal(pair, signal);
     this.#logger.trade('[' + now + '] ' + pair + ' SIGNAL: ' + signal.side + ' | ' + signal.confidence + '%');
@@ -173,43 +149,32 @@ export class TradeManager extends EventEmitter {
     if (this.#deduplicator.isDuplicate(pair, signal.side)) return;
 
     const corr = this.#correlationChecker.check(pair, signal.side);
-    if (!corr.allowed) {
-      this.#logger.trade('[' + now + '] ' + pair + ' CORRELATION: ' + corr.reason);
+    if (!corr.allowed) { this.#logger.trade('[' + now + '] ' + pair + ' CORRELATION: ' + corr.reason); return; }
+
+    // Support/Resistance validation
+    const highs = ohlcv.map(c => c[2]);
+    const lows = ohlcv.map(c => c[3]);
+    const closes = ohlcv.map(c => c[4]);
+    const price = closes[closes.length - 1];
+    const srValid = this.#marketStructure.validateEntry(signal.side, price, highs, lows, closes);
+    if (!srValid) {
+      this.#logger.trade('[' + now + '] ' + pair + ' S/R BLOCKED: Entry near unfavorable level');
       return;
     }
 
     const ob = await this.#orderbook.analyze(pair);
     const obDecision = this.#orderbook.validateSignal(signal, ob);
-    if (obDecision === 'reject') {
-      this.#logger.trade('[' + now + '] ' + pair + ' OB REJECTED');
-      return;
-    }
+    if (obDecision === 'reject') { this.#logger.trade('[' + now + '] ' + pair + ' OB REJECTED'); return; }
 
-    // AI Validation
     let ai = { decision: 'approve', confidence: signal.confidence };
     if (this.#config.ai.enabled) {
       this.#lifecycle.aiValidation(pair, ai);
       this.#logger.trade('[' + now + '] ' + pair + ' AI validating...');
-
       const aiStart = Date.now();
       ai = await this.#aiValidator.validate(signal, this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : undefined);
       const aiLatency = Date.now() - aiStart;
-
-      // FIX: Emit AI event to Telegram
-      this.#eventBus.emit('ai:validated', {
-        pair: pair,
-        side: signal.side,
-        decision: ai.decision,
-        confidence: ai.confidence,
-        reason: ai.reason,
-        latency: aiLatency,
-        fallback: ai.fallback || false,
-      });
-
-      if (ai.decision !== 'approve') {
-        this.#logger.trade('[' + now + '] ' + pair + ' AI REJECTED: ' + ai.reason);
-        return;
-      }
+      this.#eventBus.emit('ai:validated', { pair, side: signal.side, decision: ai.decision, confidence: ai.confidence, reason: ai.reason, latency: aiLatency, fallback: ai.fallback || false });
+      if (ai.decision !== 'approve') { this.#logger.trade('[' + now + '] ' + pair + ' AI REJECTED: ' + ai.reason); return; }
       this.#logger.trade('[' + now + '] ' + pair + ' AI APPROVED: ' + ai.confidence + '%');
     }
 
@@ -225,7 +190,16 @@ export class TradeManager extends EventEmitter {
       const atr = sig.indicators?.primary?.indicators?.atr?.value || entry * 0.01;
       const lv = this.#riskEngine.calculateLevels(entry, atr, sig.side);
       const bal = this.#portRepo.getCurrent()?.balance || this.#config.trading.startingBalance;
-      const sz = this.#riskEngine.calculatePositionSize(bal, entry, lv.stopLoss);
+
+      // Use Kelly sizing if enough trades
+      const closedTrades = this.#db.prepare("SELECT pnl FROM positions WHERE status='closed' ORDER BY close_time DESC LIMIT 50").all();
+      let sz;
+      if (closedTrades.length >= 10) {
+        sz = this.#riskEngine.calculatePositionSizeWithKelly(bal, entry, lv.stopLoss);
+        this.#logger.trade('Using Kelly sizing: ' + (sz.method || 'fixed'));
+      } else {
+        sz = this.#riskEngine.calculatePositionSize(bal, entry, lv.stopLoss);
+      }
 
       if (obDecision === 'caution') { sz.quantity *= 0.5; sz.riskAmount *= 0.5; }
       if (sz.quantity <= 0 || sz.marginRequired > bal) { this.#logger.trade('Skip: sizing'); return; }
@@ -310,8 +284,7 @@ export class TradeManager extends EventEmitter {
       await this.#close(pos, price, 'take_profit', pnl); return;
     }
 
-    if (!pos.break_even_applied && pos.break_even_price &&
-        this.#riskEngine.shouldBreakEven(price, pos.entry_price, pos.break_even_price, pos.side)) {
+    if (!pos.break_even_applied && pos.break_even_price && this.#riskEngine.shouldBreakEven(price, pos.entry_price, pos.break_even_price, pos.side)) {
       this.#pm.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: true });
       this.#posRepo.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: 1 });
       this.#lifecycle.breakEven(pos.id, price);
@@ -357,33 +330,19 @@ export class TradeManager extends EventEmitter {
     this.#logger.trade('CLOSED: ' + pos.id + ' | ' + reason + ' | $' + net.toFixed(2));
   }
 
-  #calcPnl(pos, price) {
-    return (pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price) * (pos.remaining_quantity || pos.quantity);
-  }
-
-  #calcPnlForQty(pos, price, qty) {
-    return (pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price) * qty;
-  }
-
-  #validatePrice(price) {
-    if (!price || isNaN(price) || price <= 0) return null;
-    return price;
-  }
-
+  #calcPnl(pos, price) { return (pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price) * (pos.remaining_quantity || pos.quantity); }
+  #calcPnlForQty(pos, price, qty) { return (pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price) * qty; }
+  #validatePrice(price) { if (!price || isNaN(price) || price <= 0) return null; return price; }
   #ts() { return new Date().toISOString().replace('T', ' ').substring(0, 19); }
   #sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  async shutdown() {
-    this.#running = false;
-    if (this.#loop) { clearInterval(this.#loop); this.#loop = null; }
-    this.#logger.info('TradeManager shutdown');
-  }
-
+  async shutdown() { this.#running = false; if (this.#loop) { clearInterval(this.#loop); this.#loop = null; } this.#logger.info('TradeManager shutdown'); }
   getOpenPositions() { return this.#pm.getAll(); }
   getPortfolio() { return this.#portRepo.getCurrent(); }
   getLastTradeTime() { return this.#lastTradeTime; }
   get orderbook() { return this.#orderbook; }
   get marketFilter() { return this.#marketFilter; }
+  get marketStructure() { return this.#marketStructure; }
   get sessionFilter() { return this.#sessionFilter; }
   get strategyMode() { return this.#strategyMode; }
 }

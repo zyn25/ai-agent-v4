@@ -2,6 +2,7 @@ import { KellyCriterion } from './KellyCriterion.js';
 
 export class PositionSizer {
   #config; #kelly;
+
   constructor(config) {
     this.#config = config;
     this.#kelly = new KellyCriterion(config);
@@ -32,15 +33,9 @@ export class PositionSizer {
     };
   }
 
-  calculateKelly(trades, balance) {
-    return this.#kelly.getRecommendedSize(trades, balance);
-  }
-
   calculateWithKelly(balance, entryPrice, stopLoss, trades) {
     const fixed = this.calculate(balance, entryPrice, stopLoss);
     const kelly = this.#kelly.getRecommendedSize(trades, balance);
-
-    // Use Kelly if confidence is high, otherwise use fixed
     const useKelly = kelly.confidence === 'high' && parseFloat(kelly.sizePercent) > 0;
 
     if (useKelly) {
@@ -54,7 +49,7 @@ export class PositionSizer {
         riskPercent: parseFloat(kelly.sizePercent),
         marginRequired: Math.round((kellyQty * entryPrice / fixed.leverage) * 100) / 100,
         method: 'kelly',
-        kelly: kelly
+        kelly
       };
     }
 
