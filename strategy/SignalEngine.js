@@ -5,22 +5,22 @@ import { ATRIndicator } from './indicators/ATR.js';
 import { VolumeIndicator } from './indicators/Volume.js';
 import { TrendFilter } from './TrendFilter.js';
 import { TrendStrength } from './TrendStrength.js';
-import { PullbackFilter } from './PullbackFilter.js';
-import { CandlePatterns } from './CandlePatterns.js';
 import { SIDE } from '../utils/constants.js';
 
 /**
- * Signal engine with pullback filter and candle confirmation.
- * IMPROVED: Better entry timing reduces false signals.
+ * Signal engine - REVERTED to proven strategy.
+ * Only keeps: Trend Strength + Trend Alignment + Confidence Threshold.
+ * New filters removed (they hurt performance in backtest).
  */
 export class SignalEngine {
-  #config; #logger; #marketData; #strategyMode; #trendStrength; #pullback; #candlePatterns;
+  #config; #logger; #marketData; #strategyMode; #trendStrength;
+
   constructor(config, logger, marketData, strategyMode) {
-    this.#config = config; this.#logger = logger; this.#marketData = marketData;
+    this.#config = config;
+    this.#logger = logger;
+    this.#marketData = marketData;
     this.#strategyMode = strategyMode;
     this.#trendStrength = new TrendStrength(config, logger);
-    this.#pullback = new PullbackFilter(logger);
-    this.#candlePatterns = new CandlePatterns(logger);
   }
 
   async analyze(pair) {
@@ -42,54 +42,31 @@ export class SignalEngine {
       // Trend strength check
       const trend = this.#trendStrength.analyze(pd.closes);
       if (!trend.tradeable) {
-        return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Weak trend (strength: ' + trend.strength + ')' };
+        return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Weak trend (' + trend.strength + ')' };
       }
 
       const mtf = ps.score + ss.score + ts.score;
       const aligned = TrendFilter.checkAlignment(ps.trend, ss.trend, ts.trend);
       const rawThreshold = this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : this.#config.indicators.confidenceThreshold;
-      const threshold = Number(rawThreshold) || 35;
-
-      const side = mtf > 0 ? SIDE.LONG : SIDE.SHORT;
-      const confidence = Math.min(Math.abs(mtf), 100);
-
-      // IMPROVED: Pullback filter
-      const pullback = this.#pullback.check(pd.closes, pd.highs, pd.lows, side);
-      if (!pullback.valid) {
-        return { pair: targetPair, side: 'neutral', confidence, reason: 'Pullback: ' + pullback.reason };
-      }
-
-      // IMPROVED: Candle pattern confirmation
-      const candleConfirm = this.#candlePatterns.confirm(side, pd.closes, pd.highs, pd.lows, pd.opens);
+      const threshold = Number(rawThreshold) || 45;
 
       this.#logger.trade('SIGNAL: ' + targetPair + ' | ' + primary + ':' + ps.trend + '(' + ps.score.toFixed(1) + ') | ' + secondary + ':' + ss.trend + '(' + ss.score.toFixed(1) + ') | ' + tertiary + ':' + ts.trend + '(' + ts.score.toFixed(1) + ') | MTF:' + mtf.toFixed(1) + ' | Aligned:' + aligned + ' | Trend:' + trend.strength + ' | Threshold:' + threshold);
 
       if (!aligned) return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Not aligned (' + ps.trend + '/' + ss.trend + '/' + ts.trend + ')' };
 
-      // IMPROVED: If candle pattern confirms opposite direction, reject
-      if (candleConfirm.confirmed && candleConfirm.confidence >= 70 && candleConfirm.direction !== side) {
-        return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Candle pattern opposite: ' + candleConfirm.reason };
-      }
+      const side = mtf > 0 ? SIDE.LONG : SIDE.SHORT;
+      const confidence = Math.min(Math.abs(mtf), 100);
 
-      // IMPROVED: Boost confidence if candle confirms
-      let finalConfidence = confidence;
-      if (candleConfirm.confirmed && candleConfirm.direction === side) {
-        finalConfidence = Math.min(confidence + 10, 100);
-        this.#logger.trade('Candle boost: ' + candleConfirm.pattern + ' (+10 confidence)');
-      }
-
-      if (finalConfidence <= threshold) {
-        return { pair: targetPair, side: 'neutral', confidence: finalConfidence, reason: 'Below threshold (' + threshold + '%, got ' + finalConfidence.toFixed(1) + '%)' };
+      if (confidence <= threshold) {
+        return { pair: targetPair, side: 'neutral', confidence, reason: 'Below threshold (' + threshold + '%, got ' + confidence.toFixed(1) + '%)' };
       }
 
       return {
         pair: targetPair,
         side,
-        confidence: Math.round(finalConfidence),
+        confidence: Math.round(confidence),
         reason: 'Signal generated',
-        indicators: { primary: ps, secondary: ss, tertiary: ts },
-        pullback: pullback,
-        candle: candleConfirm,
+        indicators: { primary: ps, secondary: ss, tertiary: ts }
       };
     } catch (e) {
       this.#logger.error('Signal ' + targetPair + ':', e.message);
@@ -117,7 +94,10 @@ export class SignalEngine {
         closes: ohlcv.map(c => c[4]),
         volumes: ohlcv.map(c => c[5])
       };
-    } catch (e) { this.#logger.warn('Fetch ' + pair + ' ' + tf + ': ' + e.message); return null; }
+    } catch (e) {
+      this.#logger.warn('Fetch ' + pair + ' ' + tf + ': ' + e.message);
+      return null;
+    }
   }
 
   #calc(d, w) {
@@ -149,6 +129,7 @@ export class SignalEngine {
       if (vi === 'high' || vi === 'very_high') score *= 1.1; else if (vi === 'low') score *= 0.7;
 
       const trend = score > 0 ? 'bullish' : score < 0 ? 'bearish' : 'neutral';
+
       return {
         score, trend, weight: w,
         indicators: {
