@@ -71,15 +71,32 @@ export class RiskEngine {
     return side === 'long' ? cur - d : cur + d;
   }
 
+  /**
+   * FIX: Only trigger partial TP when price moves in PROFIT direction
+   */
   shouldPartialTP(currentPrice, entryPrice, side, currentIndex) {
     const levels = this.#config.risk.partialTpLevels;
     const sizes = this.#config.risk.partialTpSizes;
     if (currentIndex >= levels.length) return null;
+
     const targetRR = levels[currentIndex];
-    const distance = side === 'long' ? currentPrice - entryPrice : entryPrice - currentPrice;
-    const riskDistance = Math.abs(entryPrice - (side === 'long' ? entryPrice - distance : entryPrice + distance));
-    const currentRR = riskDistance > 0 ? Math.abs(distance / entryPrice) * 100 : 0;
-    if (currentRR >= targetRR) return { level: currentIndex, sizePercent: sizes[currentIndex], rr: currentRR };
+
+    // FIX: Only count profit distance (not loss distance)
+    let profitDistance = 0;
+    if (side === 'long') {
+      profitDistance = currentPrice - entryPrice;
+    } else {
+      profitDistance = entryPrice - currentPrice;
+    }
+
+    // FIX: Must be in profit to trigger partial TP
+    if (profitDistance <= 0) return null;
+
+    const currentRR = (profitDistance / entryPrice) * 100;
+
+    if (currentRR >= targetRR) {
+      return { level: currentIndex, sizePercent: sizes[currentIndex], rr: currentRR };
+    }
     return null;
   }
 
