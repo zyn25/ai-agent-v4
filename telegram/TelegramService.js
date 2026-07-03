@@ -79,6 +79,9 @@ export class TelegramService {
     this.#bot.onText(/\/closelast/,()=>{this.#tradeManager.closeLast('telegram');this.#send('🔴 Closing last...');});
     this.#bot.onText(/\/orderbook/,async()=>this.#cmdOrderbook());
     this.#bot.onText(/\/kelly/,()=>this.#cmdKelly());
+    this.#bot.onText(/\/summary/,()=>this.#cmdSummary());
+    this.#bot.onText(/\/analytics/,()=>this.#cmdAnalytics());
+    this.#bot.onText(/\/journal/,()=>this.#cmdJournal());
     this.#bot.onText(/\/mode/,()=>this.#cmdMode());
     this.#bot.onText(/\/aggressive/,()=>this.#setMode('aggressive'));
     this.#bot.onText(/\/balanced/,()=>this.#setMode('balanced'));
@@ -87,7 +90,7 @@ export class TelegramService {
   }
 
   #helpText() {
-    return '📋 <b>COMMANDS</b>\n\n📊 <b>Info:</b>\n/status /positions /balance /trades /stats /equity\n\n📈 <b>Analysis:</b>\n/orderbook /kelly\n\n⚙️ <b>Settings:</b>\n/config /risk /health /mode\n\n🎯 <b>Strategy:</b>\n/aggressive /balanced /conservative /scalping\n\n🚨 <b>Emergency:</b>\n/pause /resume /closeall /closelast';
+    return '📋 <b>COMMANDS</b>\n\n📊 <b>Info:</b>\n/status /positions /balance /trades /stats /equity\n\n📈 <b>Analysis:</b>\n/orderbook /kelly /summary /analytics /journal\n\n⚙️ <b>Settings:</b>\n/config /risk /health /mode\n\n🎯 <b>Strategy:</b>\n/aggressive /balanced /conservative /scalping\n\n🚨 <b>Emergency:</b>\n/pause /resume /closeall /closelast';
   }
 
   async #cmdStatus() {
@@ -174,7 +177,8 @@ export class TelegramService {
 
   #cmdConfig() {
     const c=this.#config;
-    this.#send('⚙️ <b>CONFIG</b>\n\nMode: '+c.trading.mode+'\nPairs: '+c.pairs.join(', ')+'\nLeverage: '+c.exchange.leverage+'x\nAI: '+(c.ai.enabled?'ON':'OFF')+'\nStatus: '+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING'));
+    const currentMode=this.#strategyModeName();
+    this.#send('⚙️ <b>CONFIG</b>\n\nMode: '+c.trading.mode+'\nStrategy: <b>'+currentMode+'</b>\nPairs: '+c.pairs.join(', ')+'\nLeverage: '+c.exchange.leverage+'x\nAI: '+(c.ai.enabled?'ON':'OFF')+'\nStatus: '+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING'));
   }
 
   #cmdRisk() {
@@ -198,13 +202,15 @@ export class TelegramService {
       exLatency=Date.now()-start;
     } catch { exStatus='❌'; exLatency=-1; }
 
+    const currentMode=this.#strategyModeName();
+
     this.#send(
       '🏥 <b>HEALTH</b>\n\n'+
       'CPU:            <code>'+cpu+'%</code>\n'+
       'RAM:            <code>'+ram+'%</code>\n'+
       'Uptime:         <code>'+h+'h '+m+'m</code>\n'+
       'Positions:      <code>'+this.#posRepo.countOpen()+'</code>\n'+
-      'Mode:           <code>balanced</code>\n'+
+      'Mode:           <code>'+currentMode+'</code>\n'+
       'Status:         <code>'+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'</code>\n'+
       'Exchange:       <code>'+exStatus+' ('+exLatency+'ms)</code>\n'+
       'Telegram:       <code>✅ Connected</code>\n'+
@@ -233,7 +239,6 @@ export class TelegramService {
     } catch(e){this.#send('Error');}
   }
 
-  // FIX: Kelly command with proper error handling
   #cmdKelly() {
     try {
       const trades=this.#db.prepare("SELECT pnl FROM positions WHERE status='closed' ORDER BY close_time DESC LIMIT 50").all();
@@ -258,6 +263,67 @@ export class TelegramService {
     }
   }
 
+  #cmdSummary() {
+    try {
+      const trades = this.#db.prepare("SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC").all();
+      if(!trades.length){this.#send('No trades');return;}
+      const wins = trades.filter(t => t.pnl > 0);
+      const losses = trades.filter(t => t.pnl <= 0);
+      const totalPnl = trades.reduce((s,t) => s + t.pnl, 0);
+      const wr = trades.length > 0 ? ((wins.length / trades.length) * 100).toFixed(1) : '0.0';
+      const grossProfit = wins.reduce((s,t) => s + t.pnl, 0);
+      const grossLoss = Math.abs(losses.reduce((s,t) => s + t.pnl, 0));
+      const pf = grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : 'N/A';
+      const avg = (totalPnl / trades.length).toFixed(2);
+      this.#send('📊 <b>SUMMARY</b>\n\nTrades: '+trades.length+'\nWins: '+wins.length+' | Losses: '+losses.length+'\nWin Rate: '+wr+'%\nPnL: $'+totalPnl.toFixed(2)+'\nAvg: $'+avg+'\nPF: '+pf);
+    } catch(e) { this.#send('Summary error: '+e.message); }
+  }
+
+  #cmdAnalytics() {
+    try {
+      const trades = this.#db.prepare("SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC").all();
+      if(!trades.length){this.#send('No trades');return;}
+      const wins = trades.filter(t => t.pnl > 0);
+      const losses = trades.filter(t => t.pnl <= 0);
+      const pnls = trades.map(t => t.pnl);
+      const totalPnl = pnls.reduce((s,p) => s + p, 0);
+      const mean = totalPnl / pnls.length;
+      const variance = pnls.reduce((s,p) => s + Math.pow(p - mean, 2), 0) / pnls.length;
+      const stdDev = Math.sqrt(variance);
+      const sharpe = stdDev > 0 ? (mean / stdDev) * Math.sqrt(252) : 0;
+      const negPnls = pnls.filter(p => p < 0);
+      const downVar = negPnls.length ? negPnls.reduce((s,p) => s + p*p, 0) / negPnls.length : 0;
+      const sortino = Math.sqrt(downVar) > 0 ? (mean / Math.sqrt(downVar)) * Math.sqrt(252) : 0;
+      const grossProfit = wins.reduce((s,t) => s + t.pnl, 0);
+      const grossLoss = Math.abs(losses.reduce((s,t) => s + t.pnl, 0));
+      const pf = grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : 'N/A';
+      let maxDD = 0, peak = 0, running = 0;
+      for (const p of pnls) { running += p; if (running > peak) peak = running; const dd = peak - running; if (dd > maxDD) maxDD = dd; }
+      let maxWS = 0, maxLS = 0, cW = 0, cL = 0;
+      for (const t of [...trades].reverse()) {
+        if (t.pnl > 0) { cW++; cL = 0; maxWS = Math.max(maxWS, cW); }
+        else { cL++; cW = 0; maxLS = Math.max(maxLS, cL); }
+      }
+      this.#send('📊 <b>ANALYTICS</b>\n\nTrades: '+trades.length+' | W: '+wins.length+' | L: '+losses.length+'\nWin Rate: '+(trades.length>0?(wins.length/trades.length*100).toFixed(1):'0')+'%\nPnL: $'+totalPnl.toFixed(2)+'\nPF: '+pf+'\nSharpe: '+sharpe.toFixed(2)+'\nSortino: '+sortino.toFixed(2)+'\nMax DD: $'+maxDD.toFixed(2)+'\nWin Streak: '+maxWS+' | Loss Streak: '+maxLS);
+    } catch(e) { this.#send('Analytics error: '+e.message); }
+  }
+
+  #cmdJournal() {
+    try {
+      const trades = this.#db.prepare("SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC LIMIT 20").all();
+      if(!trades.length){this.#send('No trades');return;}
+      let m = '📄 <b>TRADE JOURNAL</b>\n\n';
+      trades.forEach(t => {
+        const emoji = t.pnl > 0 ? '💰' : '💸';
+        m += emoji+' '+t.id+'\n';
+        m += '   '+t.pair+' | '+t.side.toUpperCase()+'\n';
+        m += '   Entry: $'+(t.entry_price||0).toFixed(2)+' → $'+(t.exit_price||0).toFixed(2)+'\n';
+        m += '   PnL: $'+(t.pnl||0).toFixed(2)+' | '+(t.exit_reason||'N/A')+'\n\n';
+      });
+      this.#send(m);
+    } catch(e) { this.#send('Journal error: '+e.message); }
+  }
+
   #cmdMode() {
     try {
       const modes = {
@@ -266,7 +332,7 @@ export class TelegramService {
         conservative: { name: 'Conservative', conf: 60, risk: 0.5, cd: 60 },
         scalping: { name: 'Scalping', conf: 20, risk: 0.5, cd: 5 }
       };
-      let current = 'balanced'; try { const saved = this.#db.prepare("SELECT value FROM settings WHERE key='strategy_mode'").get(); if (saved) current = JSON.parse(saved.value); } catch(e) {}
+      const current = this.#strategyModeName();
       let m='🎯 <b>STRATEGY MODE</b>\n\nCurrent: <b>'+current+'</b>\n\n';
       for(const [name,mode] of Object.entries(modes)){
         const active=name===current?' ✅':'';
@@ -281,13 +347,21 @@ export class TelegramService {
   #setMode(mode) {
     const modes = ["aggressive","balanced","conservative","scalping"];
     if (modes.indexOf(mode) === -1) {
-      this.#send("Invalid mode");
+      this.#send("❌ Invalid mode");
       return;
     }
     try {
       this.#db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").run("strategy_mode", JSON.stringify(mode));
-      this.#send("Mode changed to: <b>" + mode + "</b>");
+      this.#send("✅ Mode changed to: <b>" + mode + "</b>");
     } catch(e) { this.#send("Error: " + e.message); }
+  }
+
+  #strategyModeName() {
+    try {
+      const saved = this.#db.prepare("SELECT value FROM settings WHERE key='strategy_mode'").get();
+      if (saved) return JSON.parse(saved.value);
+    } catch {}
+    return 'balanced';
   }
 
   async sendAlert(m){await this.#send('⚠️ '+m);}
