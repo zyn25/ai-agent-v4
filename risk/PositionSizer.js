@@ -1,20 +1,13 @@
-import { KellyCriterion } from './KellyCriterion.js';
-
 export class PositionSizer {
-  #config; #kelly;
-
-  constructor(config) {
-    this.#config = config;
-    this.#kelly = new KellyCriterion(config);
-  }
+  #config;
+  constructor(config) { this.#config = config; }
 
   calculate(balance, entryPrice, stopLoss) {
     const riskPercent = this.#config.risk.riskPerTrade / 100;
     const riskAmount = balance * riskPercent;
     const stopDistance = Math.abs(entryPrice - stopLoss);
-    const stopPercent = stopDistance / entryPrice;
 
-    if (stopPercent === 0) {
+    if (stopDistance === 0) {
       return { quantity: 0, riskAmount: 0, leverage: this.#config.exchange.leverage };
     }
 
@@ -33,28 +26,37 @@ export class PositionSizer {
     };
   }
 
-  calculateWithKelly(balance, entryPrice, stopLoss, trades) {
-    const fixed = this.calculate(balance, entryPrice, stopLoss);
-    const kelly = this.#kelly.getRecommendedSize(trades, balance);
-    const useKelly = kelly.confidence === 'high' && parseFloat(kelly.sizePercent) > 0;
-
-    if (useKelly) {
-      const kellyRiskAmount = balance * (parseFloat(kelly.sizePercent) / 100);
-      const stopDistance = Math.abs(entryPrice - stopLoss);
-      const kellyQty = stopDistance > 0 ? kellyRiskAmount / stopDistance : 0;
-      return {
-        ...fixed,
-        quantity: Math.floor(kellyQty * 10000) / 10000,
-        riskAmount: Math.round(kellyRiskAmount * 100) / 100,
-        riskPercent: parseFloat(kelly.sizePercent),
-        marginRequired: Math.round((kellyQty * entryPrice / fixed.leverage) * 100) / 100,
-        method: 'kelly',
-        kelly
-      };
+  calculateKelly(trades, balance) {
+    if (!trades || trades.length < 10) {
+      return { winRate: 'N/A', payoffRatio: 'N/A', kelly: 'N/A', kellyHalf: 'N/A', sizePercent: '0.50', confidence: 'low', reason: 'Need min 10 trades' };
     }
 
-    return { ...fixed, method: 'fixed', kelly };
-  }
+    const wins = trades.filter(t => t.pnl > 0);
+    const losses = trades.filter(t => t.pnl <= 0);
 
-  get kelly() { return this.#kelly; }
+    if (wins.length === 0 || losses.length === 0) {
+      return { winRate: 'N/A', payoffRatio: 'N/A', kelly: 'N/A', kellyHalf: 'N/A', sizePercent: '0.50', confidence: 'low', reason: 'Need both wins and losses' };
+    }
+
+    const winRate = wins.length / trades.length;
+    const avgWin = wins.reduce((s, t) => s + t.pnl, 0) / wins.length;
+    const avgLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0) / losses.length);
+    const payoffRatio = avgLoss > 0 ? avgWin / avgLoss : 0;
+
+    const lossRate = 1 - winRate;
+    const kellyRaw = payoffRatio > 0 ? (payoffRatio * winRate - lossRate) / payoffRatio : 0;
+    const kellyHalf = kellyRaw * 0.5;
+
+    const betSize = Math.min(Math.max(kellyHalf, 0.005), 0.05);
+
+    return {
+      winRate: (winRate * 100).toFixed(1) + '%',
+      payoffRatio: payoffRatio.toFixed(2),
+      kelly: (kellyRaw * 100).toFixed(2) + '%',
+      kellyHalf: (kellyHalf * 100).toFixed(2) + '%',
+      sizePercent: (betSize * 100).toFixed(2),
+      confidence: betSize >= 0.02 ? 'high' : betSize >= 0.01 ? 'medium' : 'low',
+      reason: kellyRaw <= 0 ? 'Negative edge' : 'OK'
+    };
+  }
 }
