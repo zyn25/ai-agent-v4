@@ -182,7 +182,7 @@ export class TelegramService {
     this.#send('🛡️ <b>RISK</b>\n\nRisk/Trade: '+r.riskPerTrade+'%\nMax Daily: '+r.maxDailyLoss+'%\nMax Pos: '+r.maxOpenPositions+'\nMax Hold: '+r.maxHoldHours+'h\nPartial TP: '+r.partialTpLevels.join('/')+'R\nCooldown: '+r.cooldownMinutes+'min');
   }
 
-  #cmdHealth() {
+  async #cmdHealth() {
     const ci=cpus(); let idle=0,total=0;
     ci.forEach(c=>{for(const t in c.times)total+=c.times[t];idle+=c.times.idle;});
     const cpu=total>0?Math.round(((total-idle)/total)*100):0;
