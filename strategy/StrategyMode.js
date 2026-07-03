@@ -1,20 +1,22 @@
+/**
+ * Strategy mode switcher.
+ * IMPROVED: Higher minimum confidence for all modes.
+ */
 export class StrategyMode {
-  #currentMode = 'aggressive';
+  #currentMode = 'balanced';
   #modes = {
-    aggressive: { name: 'Aggressive', confidenceThreshold: 25, maxOpenPositions: 5, riskPerTrade: 1.5, cooldownMinutes: 15 },
-    balanced: { name: 'Balanced', confidenceThreshold: 35, maxOpenPositions: 3, riskPerTrade: 1.0, cooldownMinutes: 30 },
-    conservative: { name: 'Conservative', confidenceThreshold: 50, maxOpenPositions: 2, riskPerTrade: 0.5, cooldownMinutes: 60 },
-    scalping: { name: 'Scalping', confidenceThreshold: 15, maxOpenPositions: 5, riskPerTrade: 0.5, cooldownMinutes: 5 }
+    aggressive: { name: 'Aggressive', confidenceThreshold: 30, maxOpenPositions: 5, riskPerTrade: 1.5, cooldownMinutes: 15 },
+    balanced: { name: 'Balanced', confidenceThreshold: 45, maxOpenPositions: 3, riskPerTrade: 1.0, cooldownMinutes: 30 },
+    conservative: { name: 'Conservative', confidenceThreshold: 60, maxOpenPositions: 2, riskPerTrade: 0.5, cooldownMinutes: 60 },
+    scalping: { name: 'Scalping', confidenceThreshold: 20, maxOpenPositions: 5, riskPerTrade: 0.5, cooldownMinutes: 5 }
   };
   #logger; #db; #loaded = false;
 
   constructor(logger, database) {
     this.#logger = logger;
     this.#db = database;
-    // Don't load from DB yet - wait for DB to initialize
   }
 
-  // FIX: Called AFTER database.initialize()
   loadFromDatabase() {
     if (this.#loaded) return;
     this.#loaded = true;
@@ -28,12 +30,11 @@ export class StrategyMode {
           return;
         }
       }
-      // No saved mode - set default
-      this.setMode('aggressive');
-      this.#logger.info('Strategy mode default: aggressive');
+      this.setMode('balanced');
+      this.#logger.info('Strategy mode default: balanced');
     } catch (e) {
       this.#logger.warn('Could not load mode, using default: ' + e.message);
-      this.#currentMode = 'aggressive';
+      this.#currentMode = 'balanced';
     }
   }
 
@@ -56,15 +57,5 @@ export class StrategyMode {
       this.#logger.error('Failed to save mode: ' + e.message);
     }
     return true;
-  }
-
-  getConfig() {
-    const mode = this.#modes[this.#currentMode];
-    return {
-      confidenceThreshold: mode.confidenceThreshold,
-      maxOpenPositions: mode.maxOpenPositions,
-      riskPerTrade: mode.riskPerTrade,
-      cooldownMinutes: mode.cooldownMinutes
-    };
   }
 }

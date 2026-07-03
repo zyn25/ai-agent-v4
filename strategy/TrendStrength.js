@@ -2,7 +2,7 @@ import { EMAIndicator } from './indicators/EMA.js';
 
 /**
  * Trend strength analyzer.
- * Only allows trade when trend is strong enough.
+ * IMPROVED: Higher threshold for stronger trends.
  */
 export class TrendStrength {
   #config; #logger;
@@ -46,7 +46,8 @@ export class TrendStrength {
     else score += 5;
 
     const direction = e20 > e50 ? 'bullish' : e20 < e50 ? 'bearish' : 'neutral';
-    const tradeable = score >= 50;
+    // IMPROVED: Higher threshold (60 instead of 50)
+    const tradeable = score >= 60;
 
     return { strength: score, direction, tradeable, emaSpread: emaSpread.toFixed(2) };
   }
