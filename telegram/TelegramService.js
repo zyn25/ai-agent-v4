@@ -266,7 +266,7 @@ export class TelegramService {
         conservative: { name: 'Conservative', conf: 60, risk: 0.5, cd: 60 },
         scalping: { name: 'Scalping', conf: 20, risk: 0.5, cd: 5 }
       };
-      const current = 'balanced';
+      let current = 'balanced'; try { const saved = this.#db.prepare("SELECT value FROM settings WHERE key='strategy_mode'").get(); if (saved) current = JSON.parse(saved.value); } catch(e) {}
       let m='🎯 <b>STRATEGY MODE</b>\n\nCurrent: <b>'+current+'</b>\n\n';
       for(const [name,mode] of Object.entries(modes)){
         const active=name===current?' ✅':'';
