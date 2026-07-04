@@ -52,6 +52,10 @@ export class TelegramService {
     this.#eventBus.on('trade:paused',d=>this.#send('⏸️ <b>PAUSED</b>\n\n'+d.reason));
     this.#eventBus.on('trade:resumed',()=>this.#send('▶️ <b>RESUMED</b>'));
     this.#eventBus.on('ai:validated',d=>{if(d.decision==='approve')this.#send(this.#formatAI(d));});
+
+    // FIX: Session block/resume notifications
+    this.#eventBus.on('session:blocked',d=>this.#send('⏸️ <b>SESSION BLOCKED</b>\n\n'+d.reason+'\nSession: '+d.session));
+    this.#eventBus.on('session:resumed',d=>this.#send('▶️ <b>SESSION RESUMED</b>\n\nSession: '+d.session));
   }
 
   #formatAI(d) {
@@ -194,29 +198,13 @@ export class TelegramService {
     const up=Math.round((Date.now()-this.#startTime)/1000);
     const h=Math.floor(up/3600); const m=Math.floor((up%3600)/60);
 
-    let exStatus='✅';
-    let exLatency=0;
-    try {
-      const start=Date.now();
-      await this.#tradeManager.orderbook.analyze(this.#config.exchange.pair);
-      exLatency=Date.now()-start;
-    } catch { exStatus='❌'; exLatency=-1; }
+    let exStatus='✅', exLatency=0;
+    try { const s=Date.now(); await this.#tradeManager.orderbook.analyze(this.#config.exchange.pair); exLatency=Date.now()-s; }
+    catch { exStatus='❌'; exLatency=-1; }
 
     const currentMode=this.#strategyModeName();
 
-    this.#send(
-      '🏥 <b>HEALTH</b>\n\n'+
-      'CPU:            <code>'+cpu+'%</code>\n'+
-      'RAM:            <code>'+ram+'%</code>\n'+
-      'Uptime:         <code>'+h+'h '+m+'m</code>\n'+
-      'Positions:      <code>'+this.#posRepo.countOpen()+'</code>\n'+
-      'Mode:           <code>'+currentMode+'</code>\n'+
-      'Status:         <code>'+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'</code>\n'+
-      'Exchange:       <code>'+exStatus+' ('+exLatency+'ms)</code>\n'+
-      'Telegram:       <code>✅ Connected</code>\n'+
-      'AI:             <code>'+(this.#config.ai.enabled?'✅ ON':'❌ OFF')+'</code>\n'+
-      'DB:             <code>✅ OK</code>'
-    );
+    this.#send('🏥 <b>HEALTH</b>\n\nCPU: <code>'+cpu+'%</code>\nRAM: <code>'+ram+'%</code>\nUptime: <code>'+h+'h '+m+'m</code>\nPositions: <code>'+this.#posRepo.countOpen()+'</code>\nMode: <code>'+currentMode+'</code>\nStatus: <code>'+(this.#tradeManager.isPaused?'⏸️ PAUSED':'▶️ RUNNING')+'</code>\nExchange: <code>'+exStatus+' ('+exLatency+'ms)</code>\nTelegram: <code>✅ Connected</code>\nAI: <code>'+(this.#config.ai.enabled?'✅ ON':'❌ OFF')+'</code>\nDB: <code>✅ OK</code>');
   }
 
   #cmdEquity() {
@@ -244,123 +232,79 @@ export class TelegramService {
       const trades=this.#db.prepare("SELECT pnl FROM positions WHERE status='closed' ORDER BY close_time DESC LIMIT 50").all();
       const p=this.#portRepo.getCurrent();
       const bal=p?p.balance:this.#config.trading.startingBalance;
-
-      if (!trades || trades.length === 0) {
-        this.#send('🎯 <b>KELLY</b>\n\nNo trades yet.\nNeed min 10 trades for Kelly calculation.');
-        return;
-      }
-
-      if (trades.length < 10) {
-        this.#send('🎯 <b>KELLY</b>\n\nTrades: '+trades.length+'\nNeed min 10 trades for calculation.\nCurrent recommendation: 0.50% (minimum)');
-        return;
-      }
-
+      if(!trades.length){this.#send('🎯 <b>KELLY</b>\n\nNo trades yet.');return;}
+      if(trades.length<10){this.#send('🎯 <b>KELLY</b>\n\nTrades: '+trades.length+'\nNeed min 10 trades.');return;}
       const k=this.#sizer.calculateKelly(trades,bal);
-      this.#send('🎯 <b>KELLY</b>\n\nTrades: '+trades.length+'\nWin Rate: '+(k.winRate||'N/A')+'\nPayoff: '+(k.payoffRatio||'N/A')+'\nKelly: '+(k.kelly||'N/A')+'\nHalf-Kelly: '+(k.kellyHalf||'N/A')+'\nRecommended: '+(k.sizePercent||'0.50')+'%\nConfidence: '+(k.confidence||'low')+'\nReason: '+(k.reason||'N/A'));
-    } catch(e) {
-      this.#logger.error('Kelly error:', e.message);
-      this.#send('🎯 <b>KELLY</b>\n\nError: '+e.message);
-    }
+      this.#send('🎯 <b>KELLY</b>\n\nTrades: '+trades.length+'\nWin Rate: '+(k.winRate||'N/A')+'\nPayoff: '+(k.payoffRatio||'N/A')+'\nKelly: '+(k.kelly||'N/A')+'\nRecommended: '+(k.sizePercent||'0.50')+'%');
+    } catch(e){this.#send('Kelly error: '+e.message);}
   }
 
   #cmdSummary() {
     try {
-      const trades = this.#db.prepare("SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC").all();
+      const trades=this.#db.prepare("SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC").all();
       if(!trades.length){this.#send('No trades');return;}
-      const wins = trades.filter(t => t.pnl > 0);
-      const losses = trades.filter(t => t.pnl <= 0);
-      const totalPnl = trades.reduce((s,t) => s + t.pnl, 0);
-      const wr = trades.length > 0 ? ((wins.length / trades.length) * 100).toFixed(1) : '0.0';
-      const grossProfit = wins.reduce((s,t) => s + t.pnl, 0);
-      const grossLoss = Math.abs(losses.reduce((s,t) => s + t.pnl, 0));
-      const pf = grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : 'N/A';
-      const avg = (totalPnl / trades.length).toFixed(2);
-      this.#send('📊 <b>SUMMARY</b>\n\nTrades: '+trades.length+'\nWins: '+wins.length+' | Losses: '+losses.length+'\nWin Rate: '+wr+'%\nPnL: $'+totalPnl.toFixed(2)+'\nAvg: $'+avg+'\nPF: '+pf);
-    } catch(e) { this.#send('Summary error: '+e.message); }
+      const wins=trades.filter(t=>t.pnl>0), losses=trades.filter(t=>t.pnl<=0);
+      const totalPnl=trades.reduce((s,t)=>s+t.pnl,0);
+      const wr=trades.length>0?((wins.length/trades.length)*100).toFixed(1):'0.0';
+      const gp=wins.reduce((s,t)=>s+t.pnl,0), gl=Math.abs(losses.reduce((s,t)=>s+t.pnl,0));
+      const pf=gl>0?(gp/gl).toFixed(2):'N/A';
+      this.#send('📊 <b>SUMMARY</b>\n\nTrades: '+trades.length+'\nWins: '+wins.length+' | Losses: '+losses.length+'\nWin Rate: '+wr+'%\nPnL: $'+totalPnl.toFixed(2)+'\nAvg: $'+(totalPnl/trades.length).toFixed(2)+'\nPF: '+pf);
+    } catch(e){this.#send('Error');}
   }
 
   #cmdAnalytics() {
     try {
-      const trades = this.#db.prepare("SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC").all();
+      const trades=this.#db.prepare("SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC").all();
       if(!trades.length){this.#send('No trades');return;}
-      const wins = trades.filter(t => t.pnl > 0);
-      const losses = trades.filter(t => t.pnl <= 0);
-      const pnls = trades.map(t => t.pnl);
-      const totalPnl = pnls.reduce((s,p) => s + p, 0);
-      const mean = totalPnl / pnls.length;
-      const variance = pnls.reduce((s,p) => s + Math.pow(p - mean, 2), 0) / pnls.length;
-      const stdDev = Math.sqrt(variance);
-      const sharpe = stdDev > 0 ? (mean / stdDev) * Math.sqrt(252) : 0;
-      const negPnls = pnls.filter(p => p < 0);
-      const downVar = negPnls.length ? negPnls.reduce((s,p) => s + p*p, 0) / negPnls.length : 0;
-      const sortino = Math.sqrt(downVar) > 0 ? (mean / Math.sqrt(downVar)) * Math.sqrt(252) : 0;
-      const grossProfit = wins.reduce((s,t) => s + t.pnl, 0);
-      const grossLoss = Math.abs(losses.reduce((s,t) => s + t.pnl, 0));
-      const pf = grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : 'N/A';
-      let maxDD = 0, peak = 0, running = 0;
-      for (const p of pnls) { running += p; if (running > peak) peak = running; const dd = peak - running; if (dd > maxDD) maxDD = dd; }
-      let maxWS = 0, maxLS = 0, cW = 0, cL = 0;
-      for (const t of [...trades].reverse()) {
-        if (t.pnl > 0) { cW++; cL = 0; maxWS = Math.max(maxWS, cW); }
-        else { cL++; cW = 0; maxLS = Math.max(maxLS, cL); }
-      }
-      this.#send('📊 <b>ANALYTICS</b>\n\nTrades: '+trades.length+' | W: '+wins.length+' | L: '+losses.length+'\nWin Rate: '+(trades.length>0?(wins.length/trades.length*100).toFixed(1):'0')+'%\nPnL: $'+totalPnl.toFixed(2)+'\nPF: '+pf+'\nSharpe: '+sharpe.toFixed(2)+'\nSortino: '+sortino.toFixed(2)+'\nMax DD: $'+maxDD.toFixed(2)+'\nWin Streak: '+maxWS+' | Loss Streak: '+maxLS);
-    } catch(e) { this.#send('Analytics error: '+e.message); }
+      const wins=trades.filter(t=>t.pnl>0), losses=trades.filter(t=>t.pnl<=0);
+      const pnls=trades.map(t=>t.pnl), totalPnl=pnls.reduce((s,p)=>s+p,0);
+      const mean=totalPnl/pnls.length;
+      const variance=pnls.reduce((s,p)=>s+Math.pow(p-mean,2),0)/pnls.length;
+      const sharpe=Math.sqrt(variance)>0?(mean/Math.sqrt(variance))*Math.sqrt(252):0;
+      const neg=pnls.filter(p=>p<0);
+      const dv=neg.length?neg.reduce((s,p)=>s+p*p,0)/neg.length:0;
+      const sortino=Math.sqrt(dv)>0?(mean/Math.sqrt(dv))*Math.sqrt(252):0;
+      const gp=wins.reduce((s,t)=>s+t.pnl,0), gl=Math.abs(losses.reduce((s,t)=>s+t.pnl,0));
+      const pf=gl>0?(gp/gl).toFixed(2):'N/A';
+      let maxDD=0,peak=0,run=0;
+      pnls.forEach(p=>{run+=p;if(run>peak)peak=run;const dd=peak-run;if(dd>maxDD)maxDD=dd;});
+      let mws=0,mls=0,cw=0,cl=0;
+      [...trades].reverse().forEach(t=>{if(t.pnl>0){cw++;cl=0;mws=Math.max(mws,cw);}else{cl++;cw=0;mls=Math.max(mls,cl);}});
+      this.#send('📊 <b>ANALYTICS</b>\n\nTrades: '+trades.length+' | W: '+wins.length+' | L: '+losses.length+'\nWin Rate: '+(trades.length>0?(wins.length/trades.length*100).toFixed(1):'0')+'%\nPnL: $'+totalPnl.toFixed(2)+'\nPF: '+pf+'\nSharpe: '+sharpe.toFixed(2)+'\nSortino: '+sortino.toFixed(2)+'\nMax DD: $'+maxDD.toFixed(2)+'\nWin Streak: '+mws+' | Loss Streak: '+mls);
+    } catch(e){this.#send('Error');}
   }
 
   #cmdJournal() {
     try {
-      const trades = this.#db.prepare("SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC LIMIT 20").all();
+      const trades=this.#db.prepare("SELECT * FROM positions WHERE status='closed' ORDER BY close_time DESC LIMIT 20").all();
       if(!trades.length){this.#send('No trades');return;}
-      let m = '📄 <b>TRADE JOURNAL</b>\n\n';
-      trades.forEach(t => {
-        const emoji = t.pnl > 0 ? '💰' : '💸';
-        m += emoji+' '+t.id+'\n';
-        m += '   '+t.pair+' | '+t.side.toUpperCase()+'\n';
-        m += '   Entry: $'+(t.entry_price||0).toFixed(2)+' → $'+(t.exit_price||0).toFixed(2)+'\n';
-        m += '   PnL: $'+(t.pnl||0).toFixed(2)+' | '+(t.exit_reason||'N/A')+'\n\n';
-      });
+      let m='📄 <b>TRADE JOURNAL</b>\n\n';
+      trades.forEach(t=>{const e=t.pnl>0?'💰':'💸';m+=e+' '+t.id+'\n   '+t.pair+' | '+t.side.toUpperCase()+'\n   $'+(t.entry_price||0).toFixed(2)+' → $'+(t.exit_price||0).toFixed(2)+'\n   PnL: $'+(t.pnl||0).toFixed(2)+' | '+(t.exit_reason||'N/A')+'\n\n';});
       this.#send(m);
-    } catch(e) { this.#send('Journal error: '+e.message); }
+    } catch(e){this.#send('Error');}
   }
 
   #cmdMode() {
     try {
-      const modes = {
-        aggressive: { name: 'Aggressive', conf: 30, risk: 1.5, cd: 15 },
-        balanced: { name: 'Balanced', conf: 45, risk: 1.0, cd: 30 },
-        conservative: { name: 'Conservative', conf: 60, risk: 0.5, cd: 60 },
-        scalping: { name: 'Scalping', conf: 20, risk: 0.5, cd: 5 }
-      };
-      const current = this.#strategyModeName();
+      const modes={aggressive:{name:'Aggressive',conf:30,risk:1.5,cd:15},balanced:{name:'Balanced',conf:45,risk:1.0,cd:30},conservative:{name:'Conservative',conf:60,risk:0.5,cd:60},scalping:{name:'Scalping',conf:20,risk:0.5,cd:5}};
+      const current=this.#strategyModeName();
       let m='🎯 <b>STRATEGY MODE</b>\n\nCurrent: <b>'+current+'</b>\n\n';
-      for(const [name,mode] of Object.entries(modes)){
-        const active=name===current?' ✅':'';
-        m+='<b>'+mode.name+'</b>'+active+'\n';
-        m+='  Conf: '+mode.conf+'% | Risk: '+mode.risk+'% | CD: '+mode.cd+'min\n\n';
-      }
+      for(const[n,mode] of Object.entries(modes)){const a=n===current?' ✅':'';m+='<b>'+mode.name+'</b>'+a+'\n  Conf: '+mode.conf+'% | Risk: '+mode.risk+'% | CD: '+mode.cd+'min\n\n';}
       m+='Change: /aggressive /balanced /conservative /scalping';
       this.#send(m);
-    } catch(e) { this.#send('Mode error: '+e.message); }
+    } catch(e){this.#send('Mode error');}
   }
 
   #setMode(mode) {
-    const modes = ["aggressive","balanced","conservative","scalping"];
-    if (modes.indexOf(mode) === -1) {
-      this.#send("❌ Invalid mode");
-      return;
-    }
+    if(['aggressive','balanced','conservative','scalping'].indexOf(mode)===-1){this.#send('❌ Invalid mode');return;}
     try {
-      this.#db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").run("strategy_mode", JSON.stringify(mode));
-      this.#send("✅ Mode changed to: <b>" + mode + "</b>");
-    } catch(e) { this.#send("Error: " + e.message); }
+      this.#db.prepare("INSERT INTO settings (key,value,updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").run('strategy_mode',JSON.stringify(mode));
+      this.#send('✅ Mode changed to: <b>'+mode+'</b>');
+    } catch(e){this.#send('Error: '+e.message);}
   }
 
   #strategyModeName() {
-    try {
-      const saved = this.#db.prepare("SELECT value FROM settings WHERE key='strategy_mode'").get();
-      if (saved) return JSON.parse(saved.value);
-    } catch {}
+    try { const s=this.#db.prepare("SELECT value FROM settings WHERE key='strategy_mode'").get(); if(s) return JSON.parse(s.value); } catch{}
     return 'balanced';
   }
 
