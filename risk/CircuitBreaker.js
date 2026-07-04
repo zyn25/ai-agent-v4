@@ -1,7 +1,3 @@
-/**
- * Circuit breaker for loss limits and trading pauses.
- * FIX: Consecutive losses count from TODAY only, not all-time.
- */
 export class CircuitBreaker {
   #config; #logger; #db;
   #paused = false; #reason = ''; #pauseTime = null;
@@ -30,41 +26,47 @@ export class CircuitBreaker {
     const p = this.#db.prepare('SELECT * FROM portfolio ORDER BY id DESC LIMIT 1').get();
     if (!p) return { allowed: true };
 
-    // Max drawdown check
-    if (p.peak_balance && p.peak_balance > 0) {
-      const dd = ((p.peak_balance - p.balance) / p.peak_balance) * 100;
+    // Guard NaN: Pastikan ada angka valid
+    const balance = Number(p.balance) || 0;
+    const peakBalance = Number(p.peak_balance) || 0;
+    const dailyPnl = Number(p.daily_pnl) || 0;
+    const weeklyPnl = Number(p.weekly_pnl) || 0;
+
+    // 1. Max drawdown check
+    if (peakBalance > 0) {
+      const dd = ((peakBalance - balance) / peakBalance) * 100;
       if (dd >= this.#config.risk.maxDrawdown) {
         this.#pause('Max drawdown ' + dd.toFixed(1) + '%');
         return { allowed: false, reason: 'Max drawdown exceeded' };
       }
     }
 
-    // Daily loss check
-    if (p.daily_pnl < 0 && p.balance > 0) {
-      const pct = Math.abs(p.daily_pnl / p.balance) * 100;
+    // 2. Daily loss check
+    if (dailyPnl < 0 && balance > 0) {
+      const pct = Math.abs(dailyPnl / balance) * 100;
       if (pct >= this.#config.risk.maxDailyLoss) {
         this.#pause('Daily loss ' + pct.toFixed(1) + '%');
         return { allowed: false, reason: 'Daily loss limit reached' };
       }
     }
 
-    // Weekly loss check
-    if (p.weekly_pnl < 0 && p.balance > 0) {
-      const pct = Math.abs(p.weekly_pnl / p.balance) * 100;
+    // 3. Weekly loss check
+    if (weeklyPnl < 0 && balance > 0) {
+      const pct = Math.abs(weeklyPnl / balance) * 100;
       if (pct >= this.#config.risk.maxWeeklyLoss) {
         this.#pause('Weekly loss ' + pct.toFixed(1) + '%');
         return { allowed: false, reason: 'Weekly loss limit reached' };
       }
     }
 
-    // Balance floor check
+    // 4. Balance floor check
     const startingBalance = this.#config.trading.startingBalance;
-    if (p.balance < startingBalance * 0.5) {
-      this.#pause('Balance below 50% ($' + p.balance.toFixed(2) + ')');
+    if (startingBalance > 0 && balance < (startingBalance * 0.5)) {
+      this.#pause('Balance below 50% ($' + balance.toFixed(2) + ')');
       return { allowed: false, reason: 'Balance critically low' };
     }
 
-    // FIX: Consecutive losses from TODAY only
+    // 5. Consecutive losses from TODAY only
     const consecutive = this.#getConsecutiveLossesToday();
     if (consecutive >= this.#config.risk.maxConsecutiveLosses) {
       this.#pause('Consecutive losses today (' + consecutive + ')');
@@ -79,10 +81,11 @@ export class CircuitBreaker {
     if (this.#lastResetDate !== today) {
       this.#lastResetDate = today;
       try {
+        // FIX: Reset daily PnL
         this.#db.prepare("UPDATE portfolio SET daily_pnl = 0, updated_at = datetime('now')").run();
         this.#logger.info('Daily PnL reset');
 
-        // FIX: Always resume after daily reset
+        // FIX: Auto resume if already paused yesterday
         if (this.#paused) {
           this.#paused = false;
           this.#reason = '';
@@ -90,13 +93,13 @@ export class CircuitBreaker {
           this.#logger.info('Circuit breaker RESUMED after daily reset');
         }
       } catch (e) {
+        // FIX: Jangan silent fail, catat errornya!
         this.#logger.error('Daily reset error:', e.message);
       }
     }
   }
 
   async recordLoss() {
-    // FIX: Check consecutive losses from TODAY only
     const consecutive = this.#getConsecutiveLossesToday();
     if (consecutive >= this.#config.risk.maxConsecutiveLosses) {
       this.#pause('Consecutive losses today (' + consecutive + ')');
@@ -112,7 +115,16 @@ export class CircuitBreaker {
     }
   }
 
-  // FIX: Count consecutive losses from TODAY only
+  // FIX: Tambahkan method resetWeekly untuk dipanggil setiap awal minggu
+  async resetWeekly() {
+    try {
+      this.#db.prepare("UPDATE portfolio SET weekly_pnl = 0, updated_at = datetime('now')").run();
+      this.#logger.info('Weekly PnL reset');
+    } catch (e) {
+      this.#logger.error('Weekly reset error:', e.message);
+    }
+  }
+
   #getConsecutiveLossesToday() {
     try {
       const trades = this.#db.prepare(
@@ -120,24 +132,29 @@ export class CircuitBreaker {
       ).all();
       let count = 0;
       for (const t of trades) {
-        if (t.pnl <= 0) count++;
+        if (Number(t.pnl) <= 0) count++;
         else break;
       }
       return count;
-    } catch {
+    } catch (e) {
+      // FIX: Jangan silent fail
+      this.#logger.error('Error counting consecutive losses:', e.message);
       return 0;
     }
   }
 
   #pause(reason) {
     this.#paused = true;
-    this.#reason = reason;
+    this.#reason = error;
     this.#pauseTime = new Date().toISOString();
     try {
       this.#db.prepare(
         "INSERT INTO system_logs (level, category, message) VALUES (?, ?, ?)"
       ).run('warn', 'circuit_breaker', 'PAUSED: ' + reason);
-    } catch {}
+    } catch (e) {
+      // FIX: Catat error ke console/logger file agar bisa di-debug
+      this.#logger.error('Failed to log pause event to DB:', e.message);
+    }
     this.#logger.warn('Circuit breaker PAUSED: ' + reason);
   }
 
