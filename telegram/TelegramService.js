@@ -168,8 +168,28 @@ export class TelegramService {
   #cmdTrades() {
     const t=this.#posRepo.findAll(10);
     if(!t||!t.length){this.#send('No trades');return;}
-    let m='📋 <b>TRADES</b>\n\n';
-    t.forEach(x=>{m+=(x.pnl>0?'💰':'💸')+' '+x.id+' | '+x.side+' | $'+(x.pnl||0).toFixed(2)+'\n';});
+    let m='📋 <b>TRADE HISTORY</b>\n\n';
+    let wins=0, losses=0, totalPnl=0;
+    t.forEach(x=>{
+      const emoji=x.status==='open'?'🟢':(x.pnl>0?'💰':'💸');
+      const sign=x.pnl>=0?'+':'';
+      const hold=x.hold_duration?Math.floor(x.hold_duration/3600000)+'h '+Math.floor((x.hold_duration%3600000)/60000)+'m':'N/A';
+      const reason=x.exit_reason||'open';
+      m+=emoji+' <b>'+x.id+'</b>\n';
+      m+='   '+x.pair+' | '+x.side.toUpperCase()+'\n';
+      m+='   Entry: $'+(x.entry_price||0).toFixed(2);
+      if(x.exit_price) m+=' → $'+x.exit_price.toFixed(2);
+      m+='\n';
+      m+='   PnL: '+sign+'$'+(x.pnl||0).toFixed(2);
+      if(x.roi) m+=' ('+sign+x.roi.toFixed(2)+'%)';
+      m+='\n';
+      m+='   '+reason+' | '+hold+'\n\n';
+      if(x.status!=='open'){totalPnl+=(x.pnl||0);if(x.pnl>0)wins++;else losses++;}
+    });
+    m+='─────────────────────\n';
+    m+='📊 <b>SUMMARY</b>\n';
+    m+='Total: '+t.length+' | W: '+wins+' | L: '+losses+'\n';
+    m+='PnL: '+(totalPnl>=0?'+':'')+'$'+totalPnl.toFixed(2);
     this.#send(m);
   }
 
