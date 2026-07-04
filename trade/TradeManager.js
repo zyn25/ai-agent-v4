@@ -17,7 +17,7 @@ export class TradeManager extends EventEmitter {
   #correlationChecker; #deduplicator; #strategyMode; #lifecycle;
   #running = false; #loop = null; #reconnect = 0;
   #paused = false; #pauseReason = ''; #lastTradeTime = 0;
-  #lastSessionBlock = ''; // FIX: Track last session block for notification
+  #lastSessionBlock = '';
 
   constructor(c, l, db, ex, se, re, av, eb, sm) {
     super();
@@ -67,7 +67,10 @@ export class TradeManager extends EventEmitter {
         const dd = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
         this.#db.prepare('INSERT INTO equity_curve (balance, equity, drawdown, drawdown_pct, peak_balance, open_positions) VALUES (?, ?, ?, ?, ?, ?)').run(p.balance, equity, peak - equity, dd, peak, open.length);
         this.#db.prepare("DELETE FROM equity_curve WHERE created_at < datetime('now', '-7 days')").run();
-      } catch (e) {}
+      } catch (e) {
+        // FIX: Jangan silent fail, catat errornya agar equity curve bisa di-monitor
+        this.#logger.error('Equity tracking error:', e.message);
+      }
     }, TIMING.EQUITY_TRACK_MS);
   }
 
@@ -98,12 +101,12 @@ export class TradeManager extends EventEmitter {
         if (!price) continue;
         const pnl = this.#calcPnl(pos, price);
         await this.#close(pos, price, 'emergency_' + reason, pnl);
-      } catch (e) { this.#logger.error('Close error ' + pos.id); }
+      } catch (e) { this.#logger.error('Close error ' + pos.id + ':', e.message); }
     }
     this.pause('Emergency: ' + reason);
   }
 
-  async closeLast(reason) {
+  async closeLast(reason = 'manual') {
     const open = this.#pm.getAll();
     if (!open.length) return;
     const pos = open[open.length - 1];
@@ -113,7 +116,7 @@ export class TradeManager extends EventEmitter {
       if (!price) return;
       const pnl = this.#calcPnl(pos, price);
       await this.#close(pos, price, 'manual_close', pnl);
-    } catch (e) { this.#logger.error('Close last error'); }
+    } catch (e) { this.#logger.error('Close last error:', e.message); }
   }
 
   async #tick() {
@@ -130,8 +133,6 @@ export class TradeManager extends EventEmitter {
     // Session filter
     const session = this.#sessionFilter.check();
     if (!session.trade) {
-      // FIX: Send Telegram notification when session blocks (weekend, off-hours)
-      // Only notify once per session block (not every 60 seconds)
       const blockKey = session.reason;
       if (this.#lastSessionBlock !== blockKey) {
         this.#lastSessionBlock = blockKey;
@@ -148,10 +149,7 @@ export class TradeManager extends EventEmitter {
     }
 
     const cooldownMs = (this.#strategyMode ? this.#strategyMode.getCooldownMinutes() : this.#config.risk.cooldownMinutes) * 60000;
-    const timeSinceLastTrade = Date.now() - this.#lastTradeTime;
-    if (timeSinceLastTrade < cooldownMs) {
-      return;
-    }
+    if (Date.now() - this.#lastTradeTime < cooldownMs) return;
 
     const can = await this.#riskEngine.canTrade();
     if (!can.allowed) {
@@ -198,8 +196,6 @@ export class TradeManager extends EventEmitter {
       return;
     }
 
-    const highs = ohlcv.map(c => c[2]);
-    const lows = ohlcv.map(c => c[3]);
     const closes = ohlcv.map(c => c[4]);
     const price = closes[closes.length - 1];
 
@@ -234,12 +230,19 @@ export class TradeManager extends EventEmitter {
       const entry = this.#validatePrice(tk.last);
       if (!entry) { this.#logger.trade('Skip: invalid price'); return; }
 
-      const atr = sig.indicators?.primary?.indicators?.atr?.value || entry * 0.01;
+      // FIX: Pastikan mencari nilai ATR dari indikator utama sebelum loop, jika null fallback 1%
+      const ind = sig.indicators?.primary?.indicators?.atr;
+      const atr = (ind && ind.value > 0) ? ind.value : entry * 0.01;
+
       const lv = this.#riskEngine.calculateLevels(entry, atr, sig.side);
       const bal = this.#portRepo.getCurrent()?.balance || this.#config.trading.startingBalance;
-      const sz = this.#riskEngine.calculatePositionSize(bal, entry, lv.stopLoss);
+      let sz = this.#riskEngine.calculatePositionSize(bal, entry, lv.stopLoss);
 
-      if (obDecision === 'caution') { sz.quantity *= 0.5; sz.riskAmount *= 0.5; }
+      if (obDecision === 'caution') { 
+        sz.quantity *= 0.5; 
+        sz.riskAmount *= 0.5; 
+      }
+      
       if (sz.quantity <= 0 || sz.marginRequired > bal) { this.#logger.trade('Skip: sizing'); return; }
       if (sz.quantity * entry < 5) { this.#logger.trade('Skip: order too small'); return; }
 
@@ -249,7 +252,8 @@ export class TradeManager extends EventEmitter {
         quantity: sz.quantity, leverage: sz.leverage,
         stop_loss: lv.stopLoss, take_profit: lv.takeProfit,
         status: 'open', ai_confidence: ai.confidence, ai_decision: ai.decision,
-        strategy_version: 'v4', open_time: new Date().toISOString()
+        strategy_version: 'v4', open_time: new Date().toISOString(),
+        atr: atr // FIX: Simpan ATR saat posisi dibuka untuk dipakai di Trailing Stop
       };
 
       this.#posRepo.create(pos);
@@ -279,16 +283,19 @@ export class TradeManager extends EventEmitter {
     const qty = pos.remaining_quantity || pos.quantity;
     const pnl = this.#calcPnl(pos, price);
 
+    // 1. Stop Loss Check
     if (pos.side === 'long' ? price <= pos.stop_loss : price >= pos.stop_loss) {
       this.#lifecycle.stopLoss(pos.id, price, pnl);
       await this.#close(pos, price, 'stop_loss', pnl); return;
     }
 
+    // 2. Max Hold Time Check
     if (Date.now() - new Date(pos.open_time).getTime() > this.#config.risk.maxHoldHours * 3600000) {
       this.#lifecycle.maxHoldExit(pos.id, price, pnl);
       await this.#close(pos, price, 'max_hold', pnl); return;
     }
 
+    // 3. Partial TP Check
     const ptpIndex = pos.partial_tp_index || 0;
     const ptp = this.#riskEngine.shouldPartialTP(price, pos.entry_price, pos.side, ptpIndex);
     if (ptp) {
@@ -308,32 +315,38 @@ export class TradeManager extends EventEmitter {
         this.#eventBus.emit('trade:partial_close', { ...pos, closePrice: price, closeQty, pnl: net, level: newIdx, remaining });
         this.#logger.trade('PTP#' + newIdx + ': ' + pos.id + ' | $' + net.toFixed(2));
 
+        // Apply Break Even after first partial TP
         if (newIdx >= 1) {
           this.#pm.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: true });
           this.#posRepo.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: 1 });
           this.#lifecycle.breakEven(pos.id, price);
         }
+        
         if (remaining <= 0.0001) { await this.#close(pos, price, 'all_tp', 0); return; }
       }
     }
 
+    // 4. Take Profit Check
     if (pos.side === 'long' ? price >= pos.take_profit : price <= pos.take_profit) {
       this.#lifecycle.finalTP(pos.id, price, pnl);
       await this.#close(pos, price, 'take_profit', pnl); return;
     }
 
+    // 5. Break Even Check (if not applied yet via Partial TP)
     if (!pos.break_even_applied && pos.break_even_price && this.#riskEngine.shouldBreakEven(price, pos.entry_price, pos.break_even_price, pos.side)) {
       this.#pm.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: true });
       this.#posRepo.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: 1 });
       this.#lifecycle.breakEven(pos.id, price);
     }
 
-    const atr = Math.abs(pos.entry_price - pos.stop_loss) / this.#config.indicators.atrSlMultiplier;
+    // 6. Trailing Stop Check - FIX: Use saved ATR to prevent 0-distance bug
+    const posAtr = Number(pos.atr) > 0 ? Number(pos.atr) : Math.abs(pos.entry_price - pos.stop_loss) / this.#config.indicators.atrSlMultiplier;
     const profitDistance = pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price;
-    const profitInR = atr > 0 ? profitDistance / atr : 0;
+    const profitInR = posAtr > 0 ? profitDistance / posAtr : 0;
 
-    if (profitInR >= 0.5) {
-      const ts = this.#riskEngine.getTrailingStop(price, atr, pos.side);
+    // FIX: Only trail if profit is at least 1.0R to avoid premature tight trailing
+    if (profitInR >= 1.0) {
+      const ts = this.#riskEngine.getTrailingStop(price, posAtr, pos.side);
       if (pos.trailing_stop) {
         if ((pos.side === 'long' && price <= pos.trailing_stop) || (pos.side === 'short' && price >= pos.trailing_stop)) {
           this.#lifecycle.trailingStop(pos.id, price);
