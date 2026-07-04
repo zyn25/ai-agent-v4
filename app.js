@@ -17,20 +17,30 @@ import { HealthMonitor } from './monitor/HealthMonitor.js';
 import { BackupManager } from './database/BackupManager.js';
 import { StrategyMode } from './strategy/StrategyMode.js';
 import { join } from 'path';
+import { mkdirSync } from 'fs';
 
 class App {
   #container;
   #logger;
   #isRunning = false;
+  #isStarting = false;
   #isShuttingDown = false;
   #MAX_ATTEMPTS = 3;
+  #SHUTDOWN_TIMEOUT_MS = 10000;
+
+  constructor() {
+    this.#handleSignal = this.#handleSignal.bind(this);
+    this.#handleFatalError = this.#handleFatalError.bind(this);
+  }
 
   async start() {
+    if (this.#isStarting || this.#isShuttingDown || this.#isRunning) return;
+    this.#isStarting = true;
+
     try {
       validateEnv();
       this.#container = new Container();
 
-      // 1. Init awal: Config, EventBus, Logger
       const config = new Config();
       const eventBus = new EventBus();
       const logger = new Logger(config);
@@ -42,14 +52,16 @@ class App {
 
       this.#logger.info('AI Agent V4 starting...');
 
-      // 2. Register dan init services
       await this.#registerServices();
       await this.#initializeServices();
 
       this.#isRunning = true;
+      this.#isStarting = false;
+
       this.#setupGracefulShutdown();
       this.#logger.info('AI Agent V4 started successfully');
     } catch (error) {
+      this.#isStarting = false;
       console.error('Fatal startup error:', error.message);
       if (this.#logger) {
         this.#logger.error('Fatal startup error: ' + error.message);
@@ -66,7 +78,6 @@ class App {
     const database = new Database(config, logger);
     this.#container.register('database', database);
 
-    // Exchange dengan Retry Eksponensial & Null Check
     let exchange = null;
     const exchangeFactory = new ExchangeFactory(config, logger);
 
@@ -118,14 +129,21 @@ class App {
     const healthMonitor = new HealthMonitor(config, logger, telegram, database, exchange, aiValidator);
     this.#container.register('healthMonitor', healthMonitor);
 
-    const backupManager = new BackupManager(join(process.cwd(), 'storage', 'agent.db'), logger);
+    // FIX: Pastikan folder storage ada
+    const backupDir = join(process.cwd(), 'storage');
+    try {
+      mkdirSync(backupDir, { recursive: true });
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+
+    const backupManager = new BackupManager(join(backupDir, 'agent.db'), logger);
     this.#container.register('backupManager', backupManager);
   }
 
   async #initializeServices() {
     const logger = this.#logger;
 
-    // Database dengan Retry
     const database = this.#container.resolve('database');
     for (let i = 1; i <= this.#MAX_ATTEMPTS; i++) {
       try {
@@ -139,7 +157,6 @@ class App {
       }
     }
 
-    // StrategyMode BEFORE TradeManager
     const strategyMode = this.#container.resolve('strategyMode');
     strategyMode.loadFromDatabase();
 
@@ -159,50 +176,61 @@ class App {
     backupManager.start();
   }
 
+  async #handleSignal(signal) {
+    if (this.#isShuttingDown) return;
+    this.#logger?.info('Received ' + signal + '. Shutting down gracefully...');
+    await this.#shutdown();
+  }
+
+  async #handleFatalError(type, payload) {
+    if (this.#isShuttingDown) return;
+    this.#logger?.error(type + ':', payload);
+    await this.#shutdown(true);
+    process.exit(1);
+  }
+
   #setupGracefulShutdown() {
-    const shutdown = async (signal) => {
-      if (!this.#isRunning || this.#isShuttingDown) return;
-      this.#isShuttingDown = true;
-      this.#logger.info('Received ' + signal + '. Shutting down gracefully...');
+    process.once('SIGTERM', () => this.#handleSignal('SIGTERM'));
+    process.once('SIGINT', () => this.#handleSignal('SIGINT'));
+    process.once('uncaughtException', (err) => this.#handleFatalError('Uncaught exception', err));
+    process.once('unhandledRejection', (reason) => this.#handleFatalError('Unhandled rejection', reason));
+  }
 
-      try {
-        const telegram = this.#container.resolve('telegram');
-        const tradeManager = this.#container.resolve('tradeManager');
-        const reportService = this.#container.resolve('reportService');
-        const healthMonitor = this.#container.resolve('healthMonitor');
-        const backupManager = this.#container.resolve('backupManager');
-        const database = this.#container.resolve('database');
+  async #shutdown(isFatal = false) {
+    if (this.#isShuttingDown || (!this.#isRunning && !isFatal)) return;
+    this.#isShuttingDown = true;
+    this.#isRunning = false;
 
-        // Parallel shutdown - tidak gagal jika salah satu hang
-        await Promise.allSettled([
-          telegram.shutdown ? telegram.shutdown() : Promise.resolve(),
-          tradeManager.shutdown(),
-          reportService.stop(),
-          healthMonitor.stop(),
-          backupManager.stop()
-        ]);
+    try {
+      const telegram = this.#container.resolve('telegram');
+      const tradeManager = this.#container.resolve('tradeManager');
+      const reportService = this.#container.resolve('reportService');
+      const healthMonitor = this.#container.resolve('healthMonitor');
+      const backupManager = this.#container.resolve('backupManager');
+      const database = this.#container.resolve('database');
 
-        // Database terakhir
-        await database.close();
+      const results = await Promise.allSettled([
+        telegram?.shutdown?.() ?? Promise.resolve(),
+        tradeManager?.shutdown?.(),
+        reportService?.stop?.(),
+        healthMonitor?.stop?.(),
+        backupManager?.stop?.()
+      ]);
 
-        this.#logger.info('Shutdown complete');
-        process.exit(0);
-      } catch (error) {
-        this.#logger.error('Error during shutdown:', error);
-        process.exit(1);
-      }
-    };
+      results.forEach((res, idx) => {
+        if (res.status === 'rejected') {
+          this.#logger?.error('Shutdown step [' + idx + '] failed:', res.reason);
+        }
+      });
 
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('uncaughtException', (error) => {
-      this.#logger?.error('Uncaught exception:', error);
+      await database?.close?.();
+      this.#logger?.info('Shutdown complete');
+
+      if (!isFatal) process.exit(0);
+    } catch (error) {
+      this.#logger?.error('Error during shutdown:', error);
       process.exit(1);
-    });
-    process.on('unhandledRejection', (reason) => {
-      this.#logger?.error('Unhandled rejection:', reason);
-      process.exit(1);
-    });
+    }
   }
 }
 
