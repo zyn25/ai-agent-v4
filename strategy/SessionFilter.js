@@ -1,41 +1,20 @@
-/**
- * Trading session filter.
- * Avoids low-liquidity periods (weekends, holidays, off-hours).
- * Required by master prompt: "Avoid low volume markets"
- */
 export class SessionFilter {
   #config; #logger;
   constructor(config, logger) { this.#config = config; this.#logger = logger; }
 
   /**
-   * Check if current time is good for trading
-   * Returns: { trade: boolean, reason: string, session: string }
+   * Check if current time is good for trading.
+   * FIX: Crypto markets are 24/7. Weekend logic removed.
    */
   check() {
     const now = new Date();
     const utcHour = now.getUTCHours();
-    const utcDay = now.getUTCDay();
     const utcMinute = now.getUTCMinutes();
 
-    // Weekend check (Saturday=6, Sunday=0)
-    if (utcDay === 0 || utcDay === 6) {
-      return { trade: false, reason: 'Weekend - markets closed', session: 'weekend' };
-    }
-
-    // Friday late session (after 20:00 UTC)
-    if (utcDay === 5 && utcHour >= 20) {
-      return { trade: false, reason: 'Friday late - low liquidity', session: 'friday_close' };
-    }
-
-    // Monday early (before 01:00 UTC)
-    if (utcDay === 1 && utcHour < 1) {
-      return { trade: false, reason: 'Monday early - gap risk', session: 'monday_open' };
-    }
-
-    // Define trading sessions
+    // Define trading sessions (Crypto 24/7)
     const session = this.#getSession(utcHour, utcMinute);
 
-    // Off-hours (low liquidity)
+    // Off-hours (low liquidity in crypto usually around 21:00 - 00:00 UTC)
     if (session === 'off_hours') {
       return { trade: false, reason: 'Off-hours - low liquidity', session };
     }
@@ -48,6 +27,10 @@ export class SessionFilter {
     return { trade: true, reason: session + ' session - good liquidity', session };
   }
 
+  /**
+   * Get current trading session based on UTC hour.
+   * FIX: Clear separation of London and NY sessions.
+   */
   #getSession(hour, minute) {
     // Asian Session: 00:00 - 08:00 UTC (Tokyo, Shanghai)
     if (hour >= 0 && hour < 8) {
@@ -55,14 +38,17 @@ export class SessionFilter {
       return 'asian';
     }
 
-    // London Session: 08:00 - 16:00 UTC (London, Frankfurt)
-    if (hour >= 8 && hour < 16) {
-      // London-NY Overlap: 13:00 - 16:00 UTC (BEST liquidity)
-      if (hour >= 13) return 'london_ny_overlap';
+    // London Session: 08:00 - 13:00 UTC
+    if (hour >= 8 && hour < 13) {
       return 'london';
     }
 
-    // New York Session: 13:00 - 21:00 UTC (New York)
+    // London-NY Overlap: 13:00 - 16:00 UTC (BEST liquidity)
+    if (hour >= 13 && hour < 16) {
+      return 'london_ny_overlap';
+    }
+
+    // New York Session: 16:00 - 21:00 UTC
     if (hour >= 16 && hour < 21) {
       return 'new_york';
     }
@@ -72,16 +58,13 @@ export class SessionFilter {
   }
 
   /**
-   * Get session quality score (0-100)
-   * Higher = better for trading
+   * Get session quality score (0-100).
+   * Higher = better for trading.
+   * FIX: Removed weekend score (crypto doesn't close).
    */
   getSessionScore() {
     const now = new Date();
     const utcHour = now.getUTCHours();
-    const utcDay = now.getUTCDay();
-
-    // Weekend = 0
-    if (utcDay === 0 || utcDay === 6) return 0;
 
     // Best: London-NY overlap (13-16 UTC)
     if (utcHour >= 13 && utcHour < 16) return 100;
@@ -98,7 +81,7 @@ export class SessionFilter {
     // Reduced: Late Asian (6-8 UTC)
     if (utcHour >= 6 && utcHour < 8) return 45;
 
-    // Low: Off-hours (21-0 UTC)
+    // Low: Off-hours (21-00 UTC)
     return 25;
   }
 }
