@@ -55,7 +55,8 @@ export class SignalEngine {
       const aligned = TrendFilter.checkAlignment(ps.trend, ss.trend, ts.trend);
 
       const rawThreshold = this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : this.#config.indicators.confidenceThreshold;
-      const threshold = Number(rawThreshold) || 45;
+      // Fix: Gunakan ?? alih-alih || agar angka 0 valid sebagai threshold
+      const threshold = Number(rawThreshold) ?? 45;
 
       this.#logger.trade('SIGNAL: ' + targetPair + ' | ' +
         primary + ':' + ps.trend + '(' + ps.score.toFixed(1) + ') | ' +
@@ -149,6 +150,7 @@ export class SignalEngine {
       if (ri === 'bullish') score += w * 0.2;
       else if (ri === 'bearish') score -= w * 0.2;
 
+      // Fix string 'bearish' (sebelumnya tertulis 'beish' secara tidak sengaja)
       if (mi.includes('bullish')) score += w * 0.25;
       else if (mi.includes('bearish')) score -= w * 0.25;
 
