@@ -22,45 +22,67 @@ class App {
   #container;
   #logger;
   #isRunning = false;
+  #isShuttingDown = false;
+  #MAX_ATTEMPTS = 3;
 
   async start() {
     try {
       validateEnv();
       this.#container = new Container();
-      await this.#registerServices();
-      this.#logger = this.#container.resolve('logger');
+
+      // 1. Init awal: Config, EventBus, Logger
+      const config = new Config();
+      const eventBus = new EventBus();
+      const logger = new Logger(config);
+
+      this.#container.register('config', config);
+      this.#container.register('eventBus', eventBus);
+      this.#container.register('logger', logger);
+      this.#logger = logger;
+
       this.#logger.info('AI Agent V4 starting...');
+
+      // 2. Register dan init services
+      await this.#registerServices();
       await this.#initializeServices();
+
       this.#isRunning = true;
       this.#setupGracefulShutdown();
       this.#logger.info('AI Agent V4 started successfully');
     } catch (error) {
       console.error('Fatal startup error:', error.message);
+      if (this.#logger) {
+        this.#logger.error('Fatal startup error: ' + error.message);
+      }
       process.exit(1);
     }
   }
 
   async #registerServices() {
-    const config = new Config();
-    const eventBus = new EventBus();
-    const logger = new Logger(config);
-    const database = new Database(config, logger);
+    const config = this.#container.resolve('config');
+    const logger = this.#container.resolve('logger');
+    const eventBus = this.#container.resolve('eventBus');
 
-    this.#container.register('config', config);
-    this.#container.register('eventBus', eventBus);
-    this.#container.register('logger', logger);
+    const database = new Database(config, logger);
     this.#container.register('database', database);
 
+    // Exchange dengan Retry Eksponensial & Null Check
     let exchange = null;
     const exchangeFactory = new ExchangeFactory(config, logger);
-    for (let attempt = 1; attempt <= 3; attempt++) {
+
+    for (let attempt = 1; attempt <= this.#MAX_ATTEMPTS; attempt++) {
       try {
         exchange = await exchangeFactory.create();
+        if (!exchange || typeof exchange !== 'object') {
+          throw new Error('ExchangeFactory returned null or invalid object');
+        }
+        logger.info('Exchange connected successfully');
         break;
       } catch (error) {
-        logger.warn('Exchange attempt ' + attempt + '/3 failed: ' + error.message);
-        if (attempt === 3) throw error;
-        await new Promise(r => setTimeout(r, 5000 * attempt));
+        logger.warn('Exchange attempt ' + attempt + '/' + this.#MAX_ATTEMPTS + ' failed: ' + error.message);
+        if (attempt === this.#MAX_ATTEMPTS) throw error;
+        const backoff = 5000 * Math.pow(2, attempt - 1);
+        await new Promise(r => setTimeout(r, backoff));
       }
     }
     this.#container.register('exchange', exchange);
@@ -80,10 +102,14 @@ class App {
     const aiValidator = new AIValidator(config, logger);
     this.#container.register('aiValidator', aiValidator);
 
-    const tradeManager = new TradeManager(config, logger, database, exchange, signalEngine, riskEngine, aiValidator, eventBus, strategyMode);
+    const tradeManager = new TradeManager(
+      config, logger, database, exchange, signalEngine, riskEngine, aiValidator, eventBus, strategyMode
+    );
     this.#container.register('tradeManager', tradeManager);
 
-    const telegram = new TelegramService(config, logger, eventBus, tradeManager, database, strategyMode);
+    const telegram = new TelegramService(
+      config, logger, eventBus, tradeManager, database, strategyMode
+    );
     this.#container.register('telegram', telegram);
 
     const reportService = new ReportService(config, logger, database, telegram);
@@ -97,9 +123,23 @@ class App {
   }
 
   async #initializeServices() {
-    const database = this.#container.resolve('database');
-    await database.initialize();
+    const logger = this.#logger;
 
+    // Database dengan Retry
+    const database = this.#container.resolve('database');
+    for (let i = 1; i <= this.#MAX_ATTEMPTS; i++) {
+      try {
+        await database.initialize();
+        logger.info('Database initialized successfully');
+        break;
+      } catch (error) {
+        logger.error('DB init attempt ' + i + '/' + this.#MAX_ATTEMPTS + ' failed: ' + error.message);
+        if (i === this.#MAX_ATTEMPTS) throw new Error('Database initialization failed after retries');
+        await new Promise(r => setTimeout(r, 5000 * i));
+      }
+    }
+
+    // StrategyMode BEFORE TradeManager
     const strategyMode = this.#container.resolve('strategyMode');
     strategyMode.loadFromDatabase();
 
@@ -121,26 +161,48 @@ class App {
 
   #setupGracefulShutdown() {
     const shutdown = async (signal) => {
-      if (!this.#isRunning) return;
-      this.#isRunning = false;
-      this.#logger.info('Received ' + signal + '. Shutting down...');
+      if (!this.#isRunning || this.#isShuttingDown) return;
+      this.#isShuttingDown = true;
+      this.#logger.info('Received ' + signal + '. Shutting down gracefully...');
+
       try {
-        this.#container.resolve('tradeManager').shutdown();
-        this.#container.resolve('reportService').stop();
-        this.#container.resolve('healthMonitor').stop();
-        this.#container.resolve('backupManager').stop();
-        await this.#container.resolve('database').close();
+        const telegram = this.#container.resolve('telegram');
+        const tradeManager = this.#container.resolve('tradeManager');
+        const reportService = this.#container.resolve('reportService');
+        const healthMonitor = this.#container.resolve('healthMonitor');
+        const backupManager = this.#container.resolve('backupManager');
+        const database = this.#container.resolve('database');
+
+        // Parallel shutdown - tidak gagal jika salah satu hang
+        await Promise.allSettled([
+          telegram.shutdown ? telegram.shutdown() : Promise.resolve(),
+          tradeManager.shutdown(),
+          reportService.stop(),
+          healthMonitor.stop(),
+          backupManager.stop()
+        ]);
+
+        // Database terakhir
+        await database.close();
+
         this.#logger.info('Shutdown complete');
         process.exit(0);
       } catch (error) {
-        console.error('Shutdown error:', error);
+        this.#logger.error('Error during shutdown:', error);
         process.exit(1);
       }
     };
+
     process.on('SIGTERM', () => shutdown('SIGTERM'));
     process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('uncaughtException', (error) => { this.#logger?.error('Uncaught:', error); });
-    process.on('unhandledRejection', (reason) => { this.#logger?.error('Unhandled:', reason); });
+    process.on('uncaughtException', (error) => {
+      this.#logger?.error('Uncaught exception:', error);
+      process.exit(1);
+    });
+    process.on('unhandledRejection', (reason) => {
+      this.#logger?.error('Unhandled rejection:', reason);
+      process.exit(1);
+    });
   }
 }
 
