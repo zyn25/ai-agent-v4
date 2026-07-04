@@ -15,6 +15,7 @@ export class RiskEngine {
   async canTrade() {
     const b = await this.#breaker.check();
     if (!b.allowed) return b;
+    
     const o = this.#db.prepare("SELECT COUNT(*) as c FROM positions WHERE status='open'").get();
     if ((o?.c || 0) >= this.#config.risk.maxOpenPositions) {
       return { allowed: false, reason: 'Max positions' };
@@ -37,12 +38,19 @@ export class RiskEngine {
     const risk = this.#config.risk;
     const ind = this.#config.indicators;
 
+    // Guard: ATR wajib ada
+    if (!atr || atr <= 0) {
+      throw new Error('Invalid ATR for calculating levels');
+    }
+
     const sl = side === 'long'
       ? entry - atr * ind.atrSlMultiplier
       : entry + atr * ind.atrSlMultiplier;
+      
     const tp = side === 'long'
       ? entry + atr * ind.atrTpMultiplier
       : entry - atr * ind.atrTpMultiplier;
+      
     const be = side === 'long'
       ? entry + atr * risk.breakEvenTrigger
       : entry - atr * risk.breakEvenTrigger;
@@ -66,36 +74,49 @@ export class RiskEngine {
   }
 
   getTrailingStop(cur, atr, side) {
-    if (!cur || !atr) return null;
+    // Guard: Pastikan ATR ada dan valid
+    if (!cur || !atr || atr <= 0) return null;
+    
     const d = atr * this.#config.risk.trailingStopATR;
     return side === 'long' ? cur - d : cur + d;
   }
 
   /**
-   * FIX: Only trigger partial TP when price moves in PROFIT direction
+   * FIX: Hitung Partial TP berdasarkan Persentase Profit (ROI %), bukan R:R
+   * agar konsisten dengan target partialTpLevels di config.
    */
   shouldPartialTP(currentPrice, entryPrice, side, currentIndex) {
     const levels = this.#config.risk.partialTpLevels;
     const sizes = this.#config.risk.partialTpSizes;
-    if (currentIndex >= levels.length) return null;
+    
+    // Guard: jika index sudah melebihi jumlah level, hentikan
+    if (!levels || currentIndex >= levels.length) return null;
 
-    const targetRR = levels[currentIndex];
+    const targetROI = levels[currentIndex];
 
-    // FIX: Only count profit distance (not loss distance)
+    // Hitung jarak profit EXPRESIF
     let profitDistance = 0;
     if (side === 'long') {
       profitDistance = currentPrice - entryPrice;
-    } else {
+    } else if (side === 'short') {
       profitDistance = entryPrice - currentPrice;
+    } else {
+      return null;
     }
 
     // FIX: Must be in profit to trigger partial TP
     if (profitDistance <= 0) return null;
 
-    const currentRR = (profitDistance / entryPrice) * 100;
+    // Hitung ROI (Return On Investment) dalam persen
+    if (!entryPrice || entryPrice <= 0) return null;
+    const currentROI = (profitDistance / entryPrice) * 100;
 
-    if (currentRR >= targetRR) {
-      return { level: currentIndex, sizePercent: sizes[currentIndex], rr: currentRR };
+    if (currentROI >= targetROI) {
+      return { 
+        level: currentIndex, 
+        sizePercent: sizes[currentIndex], 
+        rr: currentROI 
+      };
     }
     return null;
   }
