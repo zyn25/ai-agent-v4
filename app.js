@@ -26,12 +26,6 @@ class App {
   #isStarting = false;
   #isShuttingDown = false;
   #MAX_ATTEMPTS = 3;
-  #SHUTDOWN_TIMEOUT_MS = 10000;
-
-  constructor() {
-    this.#handleSignal = this.#handleSignal.bind(this);
-    this.#handleFatalError = this.#handleFatalError.bind(this);
-  }
 
   async start() {
     if (this.#isStarting || this.#isShuttingDown || this.#isRunning) return;
@@ -129,14 +123,8 @@ class App {
     const healthMonitor = new HealthMonitor(config, logger, telegram, database, exchange, aiValidator);
     this.#container.register('healthMonitor', healthMonitor);
 
-    // FIX: Pastikan folder storage ada
     const backupDir = join(process.cwd(), 'storage');
-    try {
-      mkdirSync(backupDir, { recursive: true });
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-    }
-
+    try { mkdirSync(backupDir, { recursive: true }); } catch (e) { if (e.code !== 'EEXIST') throw e; }
     const backupManager = new BackupManager(join(backupDir, 'agent.db'), logger);
     this.#container.register('backupManager', backupManager);
   }
@@ -152,7 +140,7 @@ class App {
         break;
       } catch (error) {
         logger.error('DB init attempt ' + i + '/' + this.#MAX_ATTEMPTS + ' failed: ' + error.message);
-        if (i === this.#MAX_ATTEMPTS) throw new Error('Database initialization failed after retries');
+        if (i === this.#MAX_ATTEMPTS) throw new Error('Database init failed after retries');
         await new Promise(r => setTimeout(r, 5000 * i));
       }
     }
@@ -166,34 +154,32 @@ class App {
     const tradeManager = this.#container.resolve('tradeManager');
     await tradeManager.initialize();
 
-    const reportService = this.#container.resolve('reportService');
-    reportService.start();
-
-    const healthMonitor = this.#container.resolve('healthMonitor');
-    healthMonitor.start();
-
-    const backupManager = this.#container.resolve('backupManager');
-    backupManager.start();
+    this.#container.resolve('reportService').start();
+    this.#container.resolve('healthMonitor').start();
+    this.#container.resolve('backupManager').start();
   }
 
-  async #handleSignal(signal) {
-    if (this.#isShuttingDown) return;
-    this.#logger?.info('Received ' + signal + '. Shutting down gracefully...');
-    await this.#shutdown();
-  }
-
-  async #handleFatalError(type, payload) {
-    if (this.#isShuttingDown) return;
-    this.#logger?.error(type + ':', payload);
-    await this.#shutdown(true);
-    process.exit(1);
-  }
-
+  // FIX: Use arrow functions in setupGracefulShutdown instead of binding private methods
   #setupGracefulShutdown() {
-    process.once('SIGTERM', () => this.#handleSignal('SIGTERM'));
-    process.once('SIGINT', () => this.#handleSignal('SIGINT'));
-    process.once('uncaughtException', (err) => this.#handleFatalError('Uncaught exception', err));
-    process.once('unhandledRejection', (reason) => this.#handleFatalError('Unhandled rejection', reason));
+    const self = this;
+
+    const handleSignal = async (signal) => {
+      if (self.#isShuttingDown) return;
+      self.#logger?.info('Received ' + signal + '. Shutting down gracefully...');
+      await self.#shutdown();
+    };
+
+    const handleFatalError = async (type, payload) => {
+      if (self.#isShuttingDown) return;
+      self.#logger?.error(type + ':', payload);
+      await self.#shutdown(true);
+      process.exit(1);
+    };
+
+    process.once('SIGTERM', () => handleSignal('SIGTERM'));
+    process.once('SIGINT', () => handleSignal('SIGINT'));
+    process.once('uncaughtException', (err) => handleFatalError('Uncaught exception', err));
+    process.once('unhandledRejection', (reason) => handleFatalError('Unhandled rejection', reason));
   }
 
   async #shutdown(isFatal = false) {
