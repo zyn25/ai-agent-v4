@@ -19,7 +19,9 @@ import { StrategyMode } from './strategy/StrategyMode.js';
 import { join } from 'path';
 
 class App {
-  #container; #logger; #isRunning = false;
+  #container;
+  #logger;
+  #isRunning = false;
 
   async start() {
     try {
@@ -98,12 +100,14 @@ class App {
     const database = this.#container.resolve('database');
     await database.initialize();
 
+    const strategyMode = this.#container.resolve('strategyMode');
+    strategyMode.loadFromDatabase();
+
     const telegram = this.#container.resolve('telegram');
     await telegram.initialize();
 
     const tradeManager = this.#container.resolve('tradeManager');
     await tradeManager.initialize();
-    const strategyMode = this.#container.resolve("strategyMode"); strategyMode.loadFromDatabase();
 
     const reportService = this.#container.resolve('reportService');
     reportService.start();
