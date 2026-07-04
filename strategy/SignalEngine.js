@@ -7,13 +7,12 @@ import { TrendFilter } from './TrendFilter.js';
 import { TrendStrength } from './TrendStrength.js';
 import { SIDE } from '../utils/constants.js';
 
-/**
- * Signal engine - REVERTED to proven strategy.
- * Only keeps: Trend Strength + Trend Alignment + Confidence Threshold.
- * New filters removed (they hurt performance in backtest).
- */
 export class SignalEngine {
-  #config; #logger; #marketData; #strategyMode; #trendStrength;
+  #config;
+  #logger;
+  #marketData;
+  #strategyMode;
+  #trendStrength;
 
   constructor(config, logger, marketData, strategyMode) {
     this.#config = config;
@@ -32,14 +31,21 @@ export class SignalEngine {
         this.#fetch(targetPair, secondary),
         this.#fetch(targetPair, tertiary)
       ]);
-      if (!pd || !sd || !td) return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Data fetch failed' };
+
+      if (!pd || !sd || !td) {
+        this.#logger.warn('Signal ' + targetPair + ': Data fetch failed.');
+        return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Data fetch failed' };
+      }
 
       const ps = this.#calc(pd, 50);
       const ss = this.#calc(sd, 30);
       const ts = this.#calc(td, 20);
-      if (!ps || !ss || !ts) return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Calc failed' };
 
-      // Trend strength check
+      if (!ps || !ss || !ts) {
+        this.#logger.warn('Signal ' + targetPair + ': Calc failed.');
+        return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Calc failed' };
+      }
+
       const trend = this.#trendStrength.analyze(pd.closes);
       if (!trend.tradeable) {
         return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Weak trend (' + trend.strength + ')' };
@@ -47,12 +53,23 @@ export class SignalEngine {
 
       const mtf = ps.score + ss.score + ts.score;
       const aligned = TrendFilter.checkAlignment(ps.trend, ss.trend, ts.trend);
+
       const rawThreshold = this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : this.#config.indicators.confidenceThreshold;
       const threshold = Number(rawThreshold) || 45;
 
-      this.#logger.trade('SIGNAL: ' + targetPair + ' | ' + primary + ':' + ps.trend + '(' + ps.score.toFixed(1) + ') | ' + secondary + ':' + ss.trend + '(' + ss.score.toFixed(1) + ') | ' + tertiary + ':' + ts.trend + '(' + ts.score.toFixed(1) + ') | MTF:' + mtf.toFixed(1) + ' | Aligned:' + aligned + ' | Trend:' + trend.strength + ' | Threshold:' + threshold);
+      this.#logger.trade('SIGNAL: ' + targetPair + ' | ' +
+        primary + ':' + ps.trend + '(' + ps.score.toFixed(1) + ') | ' +
+        secondary + ':' + ss.trend + '(' + ss.score.toFixed(1) + ') | ' +
+        tertiary + ':' + ts.trend + '(' + ts.score.toFixed(1) + ') | MTF:' + mtf.toFixed(1) +
+        ' | Aligned:' + aligned + ' | Trend:' + trend.strength + ' | Threshold:' + threshold);
 
-      if (!aligned) return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Not aligned (' + ps.trend + '/' + ss.trend + '/' + ts.trend + ')' };
+      if (!aligned) {
+        return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Not aligned (' + ps.trend + '/' + ss.trend + '/' + ts.trend + ')' };
+      }
+
+      if (mtf === 0) {
+        return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Sideways (MTF Netral)' };
+      }
 
       const side = mtf > 0 ? SIDE.LONG : SIDE.SHORT;
       const confidence = Math.min(Math.abs(mtf), 100);
@@ -76,7 +93,8 @@ export class SignalEngine {
 
   async analyzeAll() {
     const signals = [];
-    for (const pair of this.#config.pairs) {
+    const pairs = this.#config.pairs || [this.#config.exchange.pair];
+    for (const pair of pairs) {
       const signal = await this.analyze(pair);
       if (signal.side !== 'neutral') signals.push(signal);
     }
@@ -111,35 +129,49 @@ export class SignalEngine {
       const ec = EMAIndicator.crossover(ef, es);
 
       const rv = RSIIndicator.calculate(closes, ind.rsiPeriod);
-      if (!rv.length) return null;
+      if (!rv || rv.length === 0) return null;
       const rsiVal = rv[rv.length - 1];
       const ri = RSIIndicator.interpret(rsiVal, ind.rsiOverbought, ind.rsiOversold);
 
       const mc = MACDIndicator.calculate(closes, ind.macdFast, ind.macdSlow, ind.macdSignal);
-      const mi = mc.histogram ? MACDIndicator.interpret(mc.MACD, mc.signal, mc.histogram) : 'neutral';
+      const mi = mc && mc.histogram ? MACDIndicator.interpret(mc.MACD, mc.signal, mc.histogram) : 'neutral';
 
       const av = ATRIndicator.calculate(highs, lows, closes, ind.atrPeriod);
+      if (!av || av.length === 0) return null;
+
       const vd = VolumeIndicator.calculate(volumes);
-      const vi = VolumeIndicator.interpret(vd.ratio);
+      const vi = vd ? VolumeIndicator.interpret(vd.ratio) : 'neutral';
 
       let score = 0;
-      if (ec === 'bullish' || ec === 'above') score += w * 0.3; else if (ec === 'bearish' || ec === 'below') score -= w * 0.3;
-      if (ri === 'bullish') score += w * 0.2; else if (ri === 'bearish') score -= w * 0.2;
-      if (mi.includes('bullish')) score += w * 0.25; else if (mi.includes('bearish')) score -= w * 0.25;
-      if (vi === 'high' || vi === 'very_high') score *= 1.1; else if (vi === 'low') score *= 0.7;
+      if (ec === 'bullish' || ec === 'above') score += w * 0.3;
+      else if (ec === 'bearish' || ec === 'below') score -= w * 0.3;
+
+      if (ri === 'bullish') score += w * 0.2;
+      else if (ri === 'bearish') score -= w * 0.2;
+
+      if (mi.includes('bullish')) score += w * 0.25;
+      else if (mi.includes('bearish')) score -= w * 0.25;
+
+      if (vi === 'high' || vi === 'very_high') score *= 1.1;
+      else if (vi === 'low') score *= 0.7;
 
       const trend = score > 0 ? 'bullish' : score < 0 ? 'bearish' : 'neutral';
 
       return {
-        score, trend, weight: w,
+        score,
+        trend,
+        weight: w,
         indicators: {
           ema: { fast: ef[ef.length - 1], slow: es[es.length - 1], cross: ec },
           rsi: { value: rsiVal, interpret: ri },
           macd: { interpret: mi },
           atr: { value: av[av.length - 1] },
-          volume: { ratio: vd.ratio, interpret: vi }
+          volume: { ratio: vd ? vd.ratio : 0, interpret: vi }
         }
       };
-    } catch (e) { return null; }
+    } catch (e) {
+      this.#logger.error('Calc error: ' + e.message);
+      return null;
+    }
   }
 }
