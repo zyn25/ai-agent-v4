@@ -11,22 +11,31 @@ export class AIValidator {
     this.#promptBuilder = new PromptBuilder();
     this.#responseParser = new ResponseParser();
     this.#cache = new Map();
-    this.#cacheTTL = 300000;
+    this.#cacheTTL = 300000; // 5 menit cache
     this.#failCount = 0;
     this.#maxFails = 3;
   }
 
   async validate(signal, strategyThreshold) {
     if (!this.#config.ai.enabled) {
-      // FIX: Use strategy threshold, not AI config threshold
       return this.#indicatorOnly(signal, strategyThreshold);
+    }
+
+    // Guard: Jika API Key hilang tapi enabled true, langsung reject
+    if (!this.#config.ai.apiKey) {
+      this.#logger.error('AI Validator: OPENROUTER_API_KEY is missing!');
+      return {
+        decision: 'reject',
+        confidence: 0,
+        reason: 'AI configuration error: Missing API Key',
+        fallback: true,
+      };
     }
 
     const cacheKey = this.#getCacheKey(signal);
     const cached = this.#getFromCache(cacheKey);
     if (cached) return cached;
 
-    // FIX: After max failures, reject instead of approve
     if (this.#failCount >= this.#maxFails) {
       this.#logger.warn('AI unavailable (' + this.#failCount + ' fails). Using REJECT mode.');
       return {
@@ -44,6 +53,8 @@ export class AIValidator {
       const latency = Date.now() - startTime;
 
       const result = this.#responseParser.parse(response);
+      
+      // Reset fail count jika berhasil
       this.#failCount = 0;
 
       this.#logger.ai(
@@ -56,7 +67,7 @@ export class AIValidator {
       this.#failCount++;
       this.#logger.error('AI failed (' + this.#failCount + '/' + this.#maxFails + '): ' + error.message);
 
-      // FIX: After max failures, REJECT
+      // Jika gagal, reject
       if (this.#failCount >= this.#maxFails) {
         return {
           decision: 'reject',
@@ -66,7 +77,6 @@ export class AIValidator {
         };
       }
 
-      // FIX: First failures = REJECT (not approve)
       return {
         decision: 'reject',
         confidence: 0,
@@ -76,19 +86,35 @@ export class AIValidator {
     }
   }
 
-  // FIX: Use strategy threshold, not AI config threshold
   #indicatorOnly(signal, strategyThreshold) {
-    const threshold = strategyThreshold || this.#config.ai.confidenceThreshold || 70;
+    // Gunakan threshold dari Config (45) jika tidak dikirim dari SignalEngine
+    const threshold = Number(strategyThreshold) || this.#config.indicators.confidenceThreshold || 45;
     const approved = signal.confidence >= threshold;
 
+    // FIX: Tambahkan logika 'wait' jika confidence sangat dekat dengan threshold
+    // agar tidak terlalu "rewel" atau terlalu "lengah" di pasar datar.
+    let decision = approved ? 'approve' : 'reject';
+    let reason = approved
+      ? 'Indicator-only: ' + signal.confidence + '% >= ' + threshold + '%'
+      : 'Indicator-only: ' + signal.confidence + '% < ' + threshold + '%';
+    
+    let riskLevel = signal.confidence >= 80 ? 'low' : signal.confidence >= 60 ? 'medium' : 'high';
+    let trendStrength = signal.confidence >= 80 ? 'strong' : signal.confidence >= 60 ? 'moderate' : 'weak';
+
+    // Jika confidence di ambang batas (misal 45-50%), kita bisa paksa 'wait'
+    // agar bot tidak sering entry-exit cepat (whipsaw)
+    if (!approved && signal.confidence >= (threshold - 5)) {
+      decision = 'wait';
+      reason += ' (Near threshold, exercising caution)';
+      riskLevel = 'high';
+    }
+
     return {
-      decision: approved ? 'approve' : 'reject',
+      decision,
       confidence: signal.confidence,
-      reason: approved
-        ? 'Indicator-only: ' + signal.confidence + '% >= ' + threshold + '%'
-        : 'Indicator-only: ' + signal.confidence + '% < ' + threshold + '%',
-      riskLevel: signal.confidence >= 80 ? 'low' : signal.confidence >= 60 ? 'medium' : 'high',
-      trendStrength: signal.confidence >= 80 ? 'strong' : signal.confidence >= 60 ? 'moderate' : 'weak',
+      reason,
+      riskLevel,
+      trendStrength,
       momentum: signal.side === 'long' ? 'bullish' : 'bearish',
       volumeAnalysis: 'neutral',
       marketCondition: 'unknown',
@@ -107,6 +133,8 @@ export class AIValidator {
           'Authorization': 'Bearer ' + this.#config.ai.apiKey,
           'Content-Type': 'application/json',
           'HTTP-Referer': 'https://ai-agent-v4.local',
+          // FIX: Tambahkan header X-Title agar OpenRouter mengenali bot kita
+          'X-Title': 'AI-Agent-V4-Trading-Bot'
         },
         body: JSON.stringify({
           model: this.#config.ai.model,
@@ -118,7 +146,7 @@ export class AIValidator {
       });
 
       if (!response.ok) {
-        throw new Error('API error: ' + response.status);
+        throw new Error('API HTTP error: ' + response.status + ' ' + response.statusText);
       }
 
       const data = await response.json();
@@ -129,13 +157,17 @@ export class AIValidator {
   }
 
   #getCacheKey(signal) {
-    return signal.side + '_' + Math.round(signal.confidence / 5) * 5;
+    // Tambahkan pair ke cache key agar tidak tertukar antar pair berbeda
+    return (signal.pair || 'unknown') + '_' + signal.side + '_' + Math.round(signal.confidence / 5) * 5;
   }
 
   #getFromCache(key) {
     const entry = this.#cache.get(key);
     if (!entry) return null;
-    if (Date.now() > entry.expiry) { this.#cache.delete(key); return null; }
+    if (Date.now() > entry.expiry) { 
+      this.#cache.delete(key); 
+      return null; 
+    }
     return entry.data;
   }
 
