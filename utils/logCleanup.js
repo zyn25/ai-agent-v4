@@ -26,22 +26,3 @@ export function cleanupLogs(logDir, maxAgeDays = 30) {
     return { error: e.message };
   }
 }
-
-/**
- * Get disk usage info
- */
-export function getDiskUsage() {
-  try {
-    const { execSync } = await import('child_process');
-    const output = execSync("df -h / | tail -1").toString().trim();
-    const parts = output.split(/\s+/);
-    return {
-      total: parts[1],
-      used: parts[2],
-      available: parts[3],
-      percent: parts[4]
-    };
-  } catch {
-    return { error: 'Cannot read disk' };
-  }
-}
