@@ -74,7 +74,8 @@ export class SignalEngine {
       const side = mtf > 0 ? SIDE.LONG : SIDE.SHORT;
 
       // EMA200 bias filter: block trades against long-term trend
-      if (trend.ema200Bias && side !== trend.ema200Bias) {
+      const ema200Direction = trend.ema200Bias === 'bullish' ? 'long' : 'short';
+      if (trend.ema200Bias && side !== ema200Direction) {
         return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Against EMA200 trend (' + trend.ema200Bias + ')' };
       }
 
