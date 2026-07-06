@@ -3,21 +3,22 @@ import { PositionRepository } from '../database/repositories/PositionRepository.
 import { PortfolioRepository } from '../database/repositories/PortfolioRepository.js';
 import { OrderbookAnalyzer } from '../strategy/OrderbookAnalyzer.js';
 import { MarketFilter } from '../strategy/MarketFilter.js';
+import { MarketStructure } from '../strategy/MarketStructure.js';
 import { SessionFilter } from '../strategy/SessionFilter.js';
 import { CorrelationChecker } from '../strategy/CorrelationChecker.js';
 import { OrderDeduplicator } from './OrderDeduplicator.js';
 import { LifecycleLogger } from './LifecycleLogger.js';
+import { EntryConfirmation } from '../strategy/EntryConfirmation.js';
 import { withRetry } from '../utils/retry.js';
 import { TRADING, TIMING } from '../utils/constants.js';
 import { EventEmitter } from 'events';
 
 export class TradeManager extends EventEmitter {
   #config; #logger; #db; #exchange; #signalEngine; #riskEngine; #aiValidator; #eventBus;
-  #pm; #posRepo; #portRepo; #orderbook; #marketFilter; #sessionFilter;
-  #correlationChecker; #deduplicator; #strategyMode; #lifecycle;
+  #pm; #posRepo; #portRepo; #orderbook; #marketFilter; #marketStructure; #sessionFilter;
+  #correlationChecker; #deduplicator; #strategyMode; #lifecycle; #entryConfirm;
   #running = false; #loop = null; #reconnect = 0;
-  #paused = false; #pauseReason = ''; #lastTradeTime = 0;
-  #lastSessionBlock = '';
+  #paused = false; #pauseReason = ''; #lastTradeTime = 0; #lastSessionBlock = '';
 
   constructor(c, l, db, ex, se, re, av, eb, sm) {
     super();
@@ -29,10 +30,12 @@ export class TradeManager extends EventEmitter {
     this.#portRepo = new PortfolioRepository(db);
     this.#orderbook = new OrderbookAnalyzer(ex, l);
     this.#marketFilter = new MarketFilter(c, l);
+    this.#marketStructure = new MarketStructure(c, l);
     this.#sessionFilter = new SessionFilter(c, l);
     this.#correlationChecker = new CorrelationChecker(db, l);
     this.#deduplicator = new OrderDeduplicator(c);
     this.#lifecycle = new LifecycleLogger(db, l);
+    this.#entryConfirm = new EntryConfirmation(l);
   }
 
   async initialize() {
@@ -67,46 +70,29 @@ export class TradeManager extends EventEmitter {
         const dd = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
         this.#db.prepare('INSERT INTO equity_curve (balance, equity, drawdown, drawdown_pct, peak_balance, open_positions) VALUES (?, ?, ?, ?, ?, ?)').run(p.balance, equity, peak - equity, dd, peak, open.length);
         this.#db.prepare("DELETE FROM equity_curve WHERE created_at < datetime('now', '-7 days')").run();
-      } catch (e) {
-        // FIX: Jangan silent fail, catat errornya agar equity curve bisa di-monitor
-        this.#logger.error('Equity tracking error:', e.message);
-      }
+      } catch (e) {}
     }, TIMING.EQUITY_TRACK_MS);
   }
 
-  pause(reason) {
-    this.#paused = true;
-    this.#pauseReason = reason || 'Manual';
-    this.#logger.warn('PAUSED: ' + this.#pauseReason);
-    this.#eventBus.emit('trade:paused', { reason: this.#pauseReason });
-  }
-
-  resume() {
-    this.#paused = false;
-    this.#pauseReason = '';
-    this.#logger.info('RESUMED');
-    this.#eventBus.emit('trade:resumed', {});
-  }
-
+  pause(reason) { this.#paused = true; this.#pauseReason = reason || 'Manual'; this.#logger.warn('PAUSED: ' + this.#pauseReason); this.#eventBus.emit('trade:paused', { reason: this.#pauseReason }); }
+  resume() { this.#paused = false; this.#pauseReason = ''; this.#logger.info('RESUMED'); this.#eventBus.emit('trade:resumed', {}); }
   get isPaused() { return this.#paused; }
   get pauseReason() { return this.#pauseReason; }
 
   async closeAll(reason) {
     const open = this.#pm.getAll();
-    this.#logger.warn('EMERGENCY: Closing ' + open.length + ' positions');
     for (const pos of open) {
       try {
         const tk = await withRetry(() => this.#exchange.fetchTicker(pos.pair));
         const price = this.#validatePrice(tk.last);
         if (!price) continue;
-        const pnl = this.#calcPnl(pos, price);
-        await this.#close(pos, price, 'emergency_' + reason, pnl);
-      } catch (e) { this.#logger.error('Close error ' + pos.id + ':', e.message); }
+        await this.#close(pos, price, 'emergency_' + reason, this.#calcPnl(pos, price));
+      } catch (e) { this.#logger.error('Close error ' + pos.id); }
     }
     this.pause('Emergency: ' + reason);
   }
 
-  async closeLast(reason = 'manual') {
+  async closeLast(reason) {
     const open = this.#pm.getAll();
     if (!open.length) return;
     const pos = open[open.length - 1];
@@ -114,51 +100,31 @@ export class TradeManager extends EventEmitter {
       const tk = await withRetry(() => this.#exchange.fetchTicker(pos.pair));
       const price = this.#validatePrice(tk.last);
       if (!price) return;
-      const pnl = this.#calcPnl(pos, price);
-      await this.#close(pos, price, 'manual_close', pnl);
-    } catch (e) { this.#logger.error('Close last error:', e.message); }
+      await this.#close(pos, price, 'manual_close', this.#calcPnl(pos, price));
+    } catch (e) { this.#logger.error('Close last error'); }
   }
 
   async #tick() {
     const now = this.#ts();
-
     try { await this.#monitor(); this.#reconnect = 0; }
-    catch (e) {
-      this.#logger.error('Monitor:', e.message);
-      this.#reconnect++;
-      if (this.#reconnect >= 5) { this.#logger.error('Exchange down. Pause 5min.'); await this.#sleep(300000); this.#reconnect = 0; }
-      return;
-    }
+    catch (e) { this.#reconnect++; if (this.#reconnect >= 5) { await this.#sleep(300000); this.#reconnect = 0; } return; }
 
-    // Session filter
     const session = this.#sessionFilter.check();
     if (!session.trade) {
       const blockKey = session.reason;
       if (this.#lastSessionBlock !== blockKey) {
         this.#lastSessionBlock = blockKey;
         this.#eventBus.emit('session:blocked', { reason: session.reason, session: session.session });
-        this.#logger.trade('[' + now + '] Session blocked: ' + session.reason);
       }
       return;
     }
-
-    // Reset session block tracking when trading resumes
-    if (this.#lastSessionBlock) {
-      this.#lastSessionBlock = '';
-      this.#eventBus.emit('session:resumed', { session: session.session });
-    }
+    if (this.#lastSessionBlock) { this.#lastSessionBlock = ''; this.#eventBus.emit('session:resumed', { session: session.session }); }
 
     const cooldownMs = (this.#strategyMode ? this.#strategyMode.getCooldownMinutes() : this.#config.risk.cooldownMinutes) * 60000;
     if (Date.now() - this.#lastTradeTime < cooldownMs) return;
 
     const can = await this.#riskEngine.canTrade();
-    if (!can.allowed) {
-      this.#logger.trade('[' + now + '] Risk blocked: ' + can.reason);
-      return;
-    }
-
-    const modeName = this.#strategyMode ? this.#strategyMode.getModeName() : 'default';
-    this.#logger.trade('[' + now + '] Scanning ' + this.#config.pairs.length + ' pairs | Session: ' + session.session + ' | Mode: ' + modeName);
+    if (!can.allowed) return;
 
     for (const pair of this.#config.pairs) {
       try { await this.#scanPair(pair, now); }
@@ -174,16 +140,10 @@ export class TradeManager extends EventEmitter {
     if (!ohlcv || ohlcv.length < 50) return;
 
     const mf = await this.#marketFilter.check(ohlcv);
-    if (!mf.trade) {
-      this.#logger.trade('[' + now + '] ' + pair + ' FILTERED: ' + mf.reason);
-      return;
-    }
+    if (!mf.trade) { this.#logger.trade('[' + now + '] ' + pair + ' FILTERED: ' + mf.reason); return; }
 
     const signal = await this.#signalEngine.analyze(pair);
-    if (signal.side === 'neutral') {
-      this.#logger.trade('[' + now + '] ' + pair + ' no signal (' + signal.reason + ')');
-      return;
-    }
+    if (signal.side === 'neutral') { this.#logger.trade('[' + now + '] ' + pair + ' no signal (' + signal.reason + ')'); return; }
 
     this.#lifecycle.signal(pair, signal);
     this.#logger.trade('[' + now + '] ' + pair + ' SIGNAL: ' + signal.side + ' | ' + signal.confidence + '%');
@@ -191,33 +151,36 @@ export class TradeManager extends EventEmitter {
     if (this.#deduplicator.isDuplicate(pair, signal.side)) return;
 
     const corr = this.#correlationChecker.check(pair, signal.side);
-    if (!corr.allowed) {
-      this.#logger.trade('[' + now + '] ' + pair + ' CORRELATION: ' + corr.reason);
+    if (!corr.allowed) { this.#logger.trade('[' + now + '] ' + pair + ' CORRELATION: ' + corr.reason); return; }
+
+    // FIX: Entry confirmation check
+    const closes = ohlcv.map(c => c[4]);
+    const opens = ohlcv.map(c => c[1]);
+    const entryConfirm = this.#entryConfirm.check(closes, opens, signal.side);
+    if (!entryConfirm.confirmed) {
+      this.#logger.trade('[' + now + '] ' + pair + ' ENTRY REJECTED: ' + entryConfirm.reason);
       return;
     }
 
-    const closes = ohlcv.map(c => c[4]);
+    // FIX: Support/Resistance check
+    const highs = ohlcv.map(c => c[2]);
+    const lows = ohlcv.map(c => c[3]);
     const price = closes[closes.length - 1];
+    const srValid = this.#marketStructure.validateEntry(signal.side, price, highs, lows, closes);
+    if (!srValid) {
+      this.#logger.trade('[' + now + '] ' + pair + ' S/R BLOCKED');
+      return;
+    }
 
     const ob = await this.#orderbook.analyze(pair);
     const obDecision = this.#orderbook.validateSignal(signal, ob);
-    if (obDecision === 'reject') {
-      this.#logger.trade('[' + now + '] ' + pair + ' OB REJECTED');
-      return;
-    }
+    if (obDecision === 'reject') { this.#logger.trade('[' + now + '] ' + pair + ' OB REJECTED'); return; }
 
     let ai = { decision: 'approve', confidence: signal.confidence };
     if (this.#config.ai.enabled) {
-      this.#lifecycle.aiValidation(pair, ai);
-      this.#logger.trade('[' + now + '] ' + pair + ' AI validating...');
-      const aiStart = Date.now();
       ai = await this.#aiValidator.validate(signal, this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : undefined);
-      const aiLatency = Date.now() - aiStart;
-      this.#eventBus.emit('ai:validated', { pair, side: signal.side, decision: ai.decision, confidence: ai.confidence, reason: ai.reason, latency: aiLatency, fallback: ai.fallback || false });
-      if (ai.decision !== 'approve') {
-        this.#logger.trade('[' + now + '] ' + pair + ' AI REJECTED: ' + ai.reason);
-        return;
-      }
+      this.#eventBus.emit('ai:validated', { pair, side: signal.side, decision: ai.decision, confidence: ai.confidence, reason: ai.reason, latency: 0, fallback: ai.fallback || false });
+      if (ai.decision !== 'approve') { this.#logger.trade('[' + now + '] ' + pair + ' AI REJECTED: ' + ai.reason); return; }
       this.#logger.trade('[' + now + '] ' + pair + ' AI APPROVED: ' + ai.confidence + '%');
     }
 
@@ -228,23 +191,16 @@ export class TradeManager extends EventEmitter {
     try {
       const tk = await withRetry(() => this.#exchange.fetchTicker(sig.pair));
       const entry = this.#validatePrice(tk.last);
-      if (!entry) { this.#logger.trade('Skip: invalid price'); return; }
+      if (!entry) return;
 
-      // FIX: Pastikan mencari nilai ATR dari indikator utama sebelum loop, jika null fallback 1%
-      const ind = sig.indicators?.primary?.indicators?.atr;
-      const atr = (ind && ind.value > 0) ? ind.value : entry * 0.01;
-
+      const atr = sig.indicators?.primary?.indicators?.atr?.value || entry * 0.01;
       const lv = this.#riskEngine.calculateLevels(entry, atr, sig.side);
       const bal = this.#portRepo.getCurrent()?.balance || this.#config.trading.startingBalance;
-      let sz = this.#riskEngine.calculatePositionSize(bal, entry, lv.stopLoss);
+      const sz = this.#riskEngine.calculatePositionSize(bal, entry, lv.stopLoss);
 
-      if (obDecision === 'caution') { 
-        sz.quantity *= 0.5; 
-        sz.riskAmount *= 0.5; 
-      }
-      
-      if (sz.quantity <= 0 || sz.marginRequired > bal) { this.#logger.trade('Skip: sizing'); return; }
-      if (sz.quantity * entry < 5) { this.#logger.trade('Skip: order too small'); return; }
+      if (obDecision === 'caution') { sz.quantity *= 0.5; sz.riskAmount *= 0.5; }
+      if (sz.quantity <= 0 || sz.marginRequired > bal) return;
+      if (sz.quantity * entry < 5) return;
 
       const id = 'T-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 8);
       const pos = {
@@ -252,8 +208,7 @@ export class TradeManager extends EventEmitter {
         quantity: sz.quantity, leverage: sz.leverage,
         stop_loss: lv.stopLoss, take_profit: lv.takeProfit,
         status: 'open', ai_confidence: ai.confidence, ai_decision: ai.decision,
-        strategy_version: 'v4', open_time: new Date().toISOString(),
-        atr: atr // FIX: Simpan ATR saat posisi dibuka untuk dipakai di Trailing Stop
+        strategy_version: 'v4', open_time: new Date().toISOString()
       };
 
       this.#posRepo.create(pos);
@@ -273,7 +228,7 @@ export class TradeManager extends EventEmitter {
       try {
         const tk = await withRetry(() => this.#exchange.fetchTicker(pos.pair), { maxRetries: 2 });
         const price = this.#validatePrice(tk.last);
-        if (!price) { this.#logger.warn('Invalid price for ' + pos.pair); continue; }
+        if (!price) continue;
         await this.#check(pos, price);
       } catch (e) { this.#logger.error('Check ' + pos.id + ':', e.message); }
     }
@@ -283,19 +238,17 @@ export class TradeManager extends EventEmitter {
     const qty = pos.remaining_quantity || pos.quantity;
     const pnl = this.#calcPnl(pos, price);
 
-    // 1. Stop Loss Check
     if (pos.side === 'long' ? price <= pos.stop_loss : price >= pos.stop_loss) {
       this.#lifecycle.stopLoss(pos.id, price, pnl);
       await this.#close(pos, price, 'stop_loss', pnl); return;
     }
 
-    // 2. Max Hold Time Check
     if (Date.now() - new Date(pos.open_time).getTime() > this.#config.risk.maxHoldHours * 3600000) {
       this.#lifecycle.maxHoldExit(pos.id, price, pnl);
       await this.#close(pos, price, 'max_hold', pnl); return;
     }
 
-    // 3. Partial TP Check
+    // Partial TP
     const ptpIndex = pos.partial_tp_index || 0;
     const ptp = this.#riskEngine.shouldPartialTP(price, pos.entry_price, pos.side, ptpIndex);
     if (ptp) {
@@ -315,38 +268,35 @@ export class TradeManager extends EventEmitter {
         this.#eventBus.emit('trade:partial_close', { ...pos, closePrice: price, closeQty, pnl: net, level: newIdx, remaining });
         this.#logger.trade('PTP#' + newIdx + ': ' + pos.id + ' | $' + net.toFixed(2));
 
-        // Apply Break Even after first partial TP
         if (newIdx >= 1) {
           this.#pm.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: true });
           this.#posRepo.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: 1 });
           this.#lifecycle.breakEven(pos.id, price);
         }
-        
         if (remaining <= 0.0001) { await this.#close(pos, price, 'all_tp', 0); return; }
       }
     }
 
-    // 4. Take Profit Check
+    // Final TP
     if (pos.side === 'long' ? price >= pos.take_profit : price <= pos.take_profit) {
       this.#lifecycle.finalTP(pos.id, price, pnl);
       await this.#close(pos, price, 'take_profit', pnl); return;
     }
 
-    // 5. Break Even Check (if not applied yet via Partial TP)
+    // Break Even
     if (!pos.break_even_applied && pos.break_even_price && this.#riskEngine.shouldBreakEven(price, pos.entry_price, pos.break_even_price, pos.side)) {
       this.#pm.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: true });
       this.#posRepo.update(pos.id, { stop_loss: pos.entry_price, break_even_applied: 1 });
       this.#lifecycle.breakEven(pos.id, price);
     }
 
-    // 6. Trailing Stop Check - FIX: Use saved ATR to prevent 0-distance bug
-    const posAtr = Number(pos.atr) > 0 ? Number(pos.atr) : Math.abs(pos.entry_price - pos.stop_loss) / this.#config.indicators.atrSlMultiplier;
+    // Trailing Stop - only after 0.5R profit
+    const atr = Math.abs(pos.entry_price - pos.stop_loss) / this.#config.indicators.atrSlMultiplier;
     const profitDistance = pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price;
-    const profitInR = posAtr > 0 ? profitDistance / posAtr : 0;
+    const profitInR = atr > 0 ? profitDistance / atr : 0;
 
-    // FIX: Only trail if profit is at least 1.0R to avoid premature tight trailing
-    if (profitInR >= 1.0) {
-      const ts = this.#riskEngine.getTrailingStop(price, posAtr, pos.side);
+    if (profitInR >= 0.5) {
+      const ts = this.#riskEngine.getTrailingStop(price, atr, pos.side);
       if (pos.trailing_stop) {
         if ((pos.side === 'long' && price <= pos.trailing_stop) || (pos.side === 'short' && price >= pos.trailing_stop)) {
           this.#lifecycle.trailingStop(pos.id, price);
@@ -375,7 +325,6 @@ export class TradeManager extends EventEmitter {
     this.#lifecycle.completed(pos.id);
 
     if (net <= 0) await this.#riskEngine.recordLoss();
-
     this.#eventBus.emit('trade:closed', { ...pos, exitPrice: price, pnl: net, roi, reason, fees, slippage: slip, holdDuration: hold });
     this.#logger.trade('CLOSED: ' + pos.id + ' | ' + reason + ' | $' + net.toFixed(2));
   }
@@ -386,12 +335,7 @@ export class TradeManager extends EventEmitter {
   #ts() { return new Date().toISOString().replace('T', ' ').substring(0, 19); }
   #sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  async shutdown() {
-    this.#running = false;
-    if (this.#loop) { clearInterval(this.#loop); this.#loop = null; }
-    this.#logger.info('TradeManager shutdown');
-  }
-
+  async shutdown() { this.#running = false; if (this.#loop) { clearInterval(this.#loop); this.#loop = null; } this.#logger.info('TradeManager shutdown'); }
   getOpenPositions() { return this.#pm.getAll(); }
   getPortfolio() { return this.#portRepo.getCurrent(); }
   getLastTradeTime() { return this.#lastTradeTime; }

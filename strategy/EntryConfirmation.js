@@ -2,11 +2,9 @@ export class EntryConfirmation {
   #logger;
   #maxLookback = 5;
 
-  constructor(logger) {
-    this.#logger = logger;
-  }
+  constructor(logger) { this.#logger = logger; }
 
-  check(closes, opens, side, minCandles = 2) {
+  check(closes, opens, side, minCandles = 3) {
     if (!Array.isArray(closes) || closes.length < this.#maxLookback) {
       return { confirmed: false, reason: 'Insufficient data', score: 0 };
     }
@@ -22,7 +20,6 @@ export class EntryConfirmation {
 
     if (side === 'long') {
       if (score.bullish >= minCandles) {
-        this.#logger?.info?.('EntryConfirmation: long CONFIRMED - ' + score.bullish + '/' + maxPossible + ' bullish');
         return { confirmed: true, reason: score.bullish + '/' + maxPossible + ' bullish', score: score.bullish };
       }
       return { confirmed: false, reason: 'Only ' + score.bullish + '/' + minCandles + ' bullish', score: score.bullish };
@@ -30,7 +27,6 @@ export class EntryConfirmation {
 
     if (side === 'short') {
       if (score.bearish >= minCandles) {
-        this.#logger?.info?.('EntryConfirmation: short CONFIRMED - ' + score.bearish + '/' + maxPossible + ' bearish');
         return { confirmed: true, reason: score.bearish + '/' + maxPossible + ' bearish', score: score.bearish };
       }
       return { confirmed: false, reason: 'Only ' + score.bearish + '/' + minCandles + ' bearish', score: score.bearish };
