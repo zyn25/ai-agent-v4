@@ -81,8 +81,8 @@ export const SIGNAL_WEIGHTS = {
 
 /** Strategy modes */
 export const STRATEGY_MODES = {
-  aggressive: { name: 'Aggressive', confidenceThreshold: 60, maxOpenPositions: 5, riskPerTrade: 1.5, cooldownMinutes: 15 },
-  balanced: { name: 'Balanced', confidenceThreshold: 80, maxOpenPositions: 3, riskPerTrade: 1.0, cooldownMinutes: 30 },
-  conservative: { name: 'Conservative', confidenceThreshold: 90, maxOpenPositions: 2, riskPerTrade: 0.5, cooldownMinutes: 60 },
-  scalping: { name: 'Scalping', confidenceThreshold: 55, maxOpenPositions: 5, riskPerTrade: 0.5, cooldownMinutes: 5 },
+  aggressive: { name: 'Aggressive', confidenceThreshold: 30, maxOpenPositions: 5, riskPerTrade: 1.5, cooldownMinutes: 15 },
+  balanced: { name: 'Balanced', confidenceThreshold: 45, maxOpenPositions: 3, riskPerTrade: 1.0, cooldownMinutes: 30 },
+  conservative: { name: 'Conservative', confidenceThreshold: 60, maxOpenPositions: 2, riskPerTrade: 0.5, cooldownMinutes: 60 },
+  scalping: { name: 'Scalping', confidenceThreshold: 20, maxOpenPositions: 5, riskPerTrade: 0.5, cooldownMinutes: 5 },
 };

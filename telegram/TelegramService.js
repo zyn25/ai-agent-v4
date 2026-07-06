@@ -7,7 +7,7 @@ import { totalmem, freemem, cpus } from 'os';
 
 export class TelegramService {
   #config; #logger; #eventBus; #tradeManager; #bot=null; #fmt; #chatId;
-  #portRepo; #posRepo; #db; #sizer;
+  #portRepo; #posRepo; #db; #sizer; #strategyMode;
   #lastRestart=0; #restartCount=0; #startTime; #exchangeLatency=0;
 
   constructor(c,l,eb,tm,db,sm) {
@@ -15,6 +15,7 @@ export class TelegramService {
     this.#fmt=new MessageFormatter(); this.#chatId=c.telegram.chatId;
     this.#portRepo=new PortfolioRepository(db); this.#posRepo=new PositionRepository(db);
     this.#db=db; this.#sizer=new PositionSizer(c); this.#startTime=Date.now();
+    this.#strategyMode=sm;
   }
 
   async initialize() {
@@ -66,31 +67,35 @@ export class TelegramService {
   }
 
   #setupCommands() {
-    this.#bot.onText(/\/start/,()=>this.#send(this.#helpText()));
-    this.#bot.onText(/\/help/,()=>this.#send(this.#helpText()));
-    this.#bot.onText(/\/status/,async()=>this.#cmdStatus());
-    this.#bot.onText(/\/positions/,()=>this.#cmdPositions());
-    this.#bot.onText(/\/balance/,()=>this.#cmdBalance());
-    this.#bot.onText(/\/trades/,()=>this.#cmdTrades());
-    this.#bot.onText(/\/stats/,()=>this.#cmdStats());
-    this.#bot.onText(/\/config/,()=>this.#cmdConfig());
-    this.#bot.onText(/\/risk/,()=>this.#cmdRisk());
-    this.#bot.onText(/\/health/,()=>this.#cmdHealth());
-    this.#bot.onText(/\/equity/,()=>this.#cmdEquity());
-    this.#bot.onText(/\/pause/,()=>{this.#tradeManager.pause('Manual');this.#send('⏸️ Paused');});
-    this.#bot.onText(/\/resume/,()=>{this.#tradeManager.resume();this.#send('▶️ Resumed');});
-    this.#bot.onText(/\/closeall/,()=>{this.#tradeManager.closeAll('telegram');this.#send('🔴 Closing all...');});
-    this.#bot.onText(/\/closelast/,()=>{this.#tradeManager.closeLast('telegram');this.#send('🔴 Closing last...');});
-    this.#bot.onText(/\/orderbook/,async()=>this.#cmdOrderbook());
-    this.#bot.onText(/\/kelly/,()=>this.#cmdKelly());
-    this.#bot.onText(/\/summary/,()=>this.#cmdSummary());
-    this.#bot.onText(/\/analytics/,()=>this.#cmdAnalytics());
-    this.#bot.onText(/\/journal/,()=>this.#cmdJournal());
-    this.#bot.onText(/\/mode/,()=>this.#cmdMode());
-    this.#bot.onText(/\/aggressive/,()=>this.#setMode('aggressive'));
-    this.#bot.onText(/\/balanced/,()=>this.#setMode('balanced'));
-    this.#bot.onText(/\/conservative/,()=>this.#setMode('conservative'));
-    this.#bot.onText(/\/scalping/,()=>this.#setMode('scalping'));
+    const auth = (msg, handler) => {
+      if (String(msg.chat.id) !== String(this.#chatId)) return;
+      handler();
+    };
+    this.#bot.onText(/\/start/, (msg) => auth(msg, () => this.#send(this.#helpText())));
+    this.#bot.onText(/\/help/, (msg) => auth(msg, () => this.#send(this.#helpText())));
+    this.#bot.onText(/\/status/, (msg) => auth(msg, async () => this.#cmdStatus()));
+    this.#bot.onText(/\/positions/, (msg) => auth(msg, () => this.#cmdPositions()));
+    this.#bot.onText(/\/balance/, (msg) => auth(msg, () => this.#cmdBalance()));
+    this.#bot.onText(/\/trades/, (msg) => auth(msg, () => this.#cmdTrades()));
+    this.#bot.onText(/\/stats/, (msg) => auth(msg, () => this.#cmdStats()));
+    this.#bot.onText(/\/config/, (msg) => auth(msg, () => this.#cmdConfig()));
+    this.#bot.onText(/\/risk/, (msg) => auth(msg, () => this.#cmdRisk()));
+    this.#bot.onText(/\/health/, (msg) => auth(msg, () => this.#cmdHealth()));
+    this.#bot.onText(/\/equity/, (msg) => auth(msg, () => this.#cmdEquity()));
+    this.#bot.onText(/\/pause/, (msg) => auth(msg, () => { this.#tradeManager.pause('Manual'); this.#send('⏸️ Paused'); }));
+    this.#bot.onText(/\/resume/, (msg) => auth(msg, () => { this.#tradeManager.resume(); this.#send('▶️ Resumed'); }));
+    this.#bot.onText(/\/closeall/, (msg) => auth(msg, () => { this.#tradeManager.closeAll('telegram'); this.#send('🔴 Closing all...'); }));
+    this.#bot.onText(/\/closelast/, (msg) => auth(msg, () => { this.#tradeManager.closeLast('telegram'); this.#send('🔴 Closing last...'); }));
+    this.#bot.onText(/\/orderbook/, (msg) => auth(msg, async () => this.#cmdOrderbook()));
+    this.#bot.onText(/\/kelly/, (msg) => auth(msg, () => this.#cmdKelly()));
+    this.#bot.onText(/\/summary/, (msg) => auth(msg, () => this.#cmdSummary()));
+    this.#bot.onText(/\/analytics/, (msg) => auth(msg, () => this.#cmdAnalytics()));
+    this.#bot.onText(/\/journal/, (msg) => auth(msg, () => this.#cmdJournal()));
+    this.#bot.onText(/\/mode/, (msg) => auth(msg, () => this.#cmdMode()));
+    this.#bot.onText(/\/aggressive/, (msg) => auth(msg, () => this.#setMode('aggressive')));
+    this.#bot.onText(/\/balanced/, (msg) => auth(msg, () => this.#setMode('balanced')));
+    this.#bot.onText(/\/conservative/, (msg) => auth(msg, () => this.#setMode('conservative')));
+    this.#bot.onText(/\/scalping/, (msg) => auth(msg, () => this.#setMode('scalping')));
   }
 
   #helpText() {
@@ -318,7 +323,10 @@ export class TelegramService {
   #setMode(mode) {
     if(['aggressive','balanced','conservative','scalping'].indexOf(mode)===-1){this.#send('❌ Invalid mode');return;}
     try {
-      this.#db.prepare("INSERT INTO settings (key,value,updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").run('strategy_mode',JSON.stringify(mode));
+      if (this.#strategyMode) this.#strategyMode.setMode(mode);
+      else {
+        this.#db.prepare("INSERT INTO settings (key,value,updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").run('strategy_mode',JSON.stringify(mode));
+      }
       this.#send('✅ Mode changed to: <b>'+mode+'</b>');
     } catch(e){this.#send('Error: '+e.message);}
   }

@@ -47,6 +47,6 @@ export class Logger {
       const fp = join(this.#logDir, LOG_FILES[cat] || 'system.log');
       if (existsSync(fp)) { const s = statSync(fp); if (s.size / 1048576 >= this.#config.logging.maxSizeMB) renameSync(fp, `${fp}.${Date.now()}`); }
       appendFileSync(fp, line + '\n');
-    } catch {}
+    } catch (e) { console.error('Log write failed:', e.message); }
   }
 }

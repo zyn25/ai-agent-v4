@@ -92,7 +92,7 @@ export class HealthMonitor {
     if (value >= threshold || threshold === 0) {
       const lastSent = this.#alerts.get(key);
       if (lastSent && Date.now() - lastSent < 300000) return;
-      await this.#telegram.sendAlert(message);
+      if (this.#telegram) await this.#telegram.sendAlert(message);
       this.#alerts.set(key, Date.now());
       this.#logger.warn('ALERT: ' + message);
     }

@@ -78,9 +78,9 @@ export class PullbackFilter {
 
   #checkLowerWick(closes, lows) {
     let count = 0;
-    for (let i = 0; i < closes.length; i++) {
-      const body = Math.abs(closes[i] - (closes[i - 1] || closes[i]));
-      const lowerWick = Math.min(closes[i], closes[i - 1] || closes[i]) - lows[i];
+    for (let i = 1; i < closes.length; i++) {
+      const body = Math.abs(closes[i] - closes[i - 1]);
+      const lowerWick = Math.min(closes[i], closes[i - 1]) - lows[i];
       if (lowerWick > body * 0.5) count++;
     }
     return count >= 1;
@@ -88,9 +88,9 @@ export class PullbackFilter {
 
   #checkUpperWick(closes, highs) {
     let count = 0;
-    for (let i = 0; i < closes.length; i++) {
-      const body = Math.abs(closes[i] - (closes[i - 1] || closes[i]));
-      const upperWick = highs[i] - Math.max(closes[i], closes[i - 1] || closes[i]);
+    for (let i = 1; i < closes.length; i++) {
+      const body = Math.abs(closes[i] - closes[i - 1]);
+      const upperWick = highs[i] - Math.max(closes[i], closes[i - 1]);
       if (upperWick > body * 0.5) count++;
     }
     return count >= 1;

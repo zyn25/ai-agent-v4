@@ -77,7 +77,7 @@ export class CircuitBreaker {
   }
 
   #autoResetDaily() {
-    const today = new Date().toDateString();
+    const today = new Date().toISOString().substring(0, 10);
     if (this.#lastResetDate !== today) {
       this.#lastResetDate = today;
       try {
@@ -145,7 +145,7 @@ export class CircuitBreaker {
 
   #pause(reason) {
     this.#paused = true;
-    this.#reason = error;
+    this.#reason = reason;
     this.#pauseTime = new Date().toISOString();
     try {
       this.#db.prepare(

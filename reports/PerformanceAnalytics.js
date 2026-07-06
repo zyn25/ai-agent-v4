@@ -23,8 +23,8 @@ export class PerformanceAnalytics {
     const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
     const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : 0;
 
-    // FIX: Max DD from starting balance, not from 0
-    const startingBalance = 10000;
+    const p = this.#db.prepare('SELECT balance FROM portfolio ORDER BY id ASC LIMIT 1').get();
+    const startingBalance = p ? p.balance : 10000;
     let peak = startingBalance;
     let maxDD = 0;
     let maxDDPct = 0;

@@ -58,7 +58,7 @@ export class Database {
           if (p.length) s.bind(p);
           if (s.step()) { const r = s.getAsObject(); s.free(); return r; }
           s.free(); return undefined;
-        } catch (e) { return undefined; }
+        } catch (e) { self.#logger?.error('DB get error:', e.message); return undefined; }
       },
       all(...p) {
         try {
@@ -67,14 +67,14 @@ export class Database {
           if (p.length) s.bind(p);
           while (s.step()) r.push(s.getAsObject());
           s.free(); return r;
-        } catch (e) { return []; }
+        } catch (e) { self.#logger?.error('DB all error:', e.message); return []; }
       },
       run(...p) {
         try {
           self.db.run(sql, p);
-          self.#dirty = true; // Mark dirty instead of immediate save
+          self.#dirty = true;
           return { changes: self.db.getRowsModified() };
-        } catch (e) { return { changes: 0 }; }
+        } catch (e) { self.#logger?.error('DB run error:', e.message); return { changes: 0 }; }
       },
     };
   }

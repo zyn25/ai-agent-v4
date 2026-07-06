@@ -50,10 +50,13 @@ export class TradeManager extends EventEmitter {
   }
 
   #startLoop() {
+    let ticking = false;
     this.#loop = setInterval(async () => {
-      if (!this.#running || this.#paused) return;
+      if (!this.#running || this.#paused || ticking) return;
+      ticking = true;
       try { await this.#tick(); }
       catch (e) { this.#logger.error('Loop:', e.message); }
+      finally { ticking = false; }
     }, TIMING.TRADING_LOOP_MS);
   }
 

@@ -57,7 +57,7 @@ export class Config {
     };
     
     this.#ai = { 
-      enabled: process.env.AI_ENABLED !== 'false', 
+      enabled: process.env.AI_ENABLED === 'true', 
       apiKey: process.env.OPENROUTER_API_KEY || '', 
       model: process.env.OPENROUTER_MODEL || 'openai/gpt-4o', 
       confidenceThreshold: parseInt(process.env.AI_CONFIDENCE_THRESHOLD, 10) || 70, 

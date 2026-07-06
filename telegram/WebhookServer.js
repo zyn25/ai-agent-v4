@@ -1,4 +1,5 @@
 import { createServer } from 'http';
+import { randomBytes } from 'crypto';
 
 /**
  * Telegram Webhook Server
@@ -88,7 +89,7 @@ export class WebhookServer {
   }
 
   #generateSecret() {
-    return Math.random().toString(36).substring(2, 15);
+    return randomBytes(32).toString('hex');
   }
 
   stop() {
