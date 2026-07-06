@@ -76,7 +76,7 @@ export class TelegramService {
     this.#bot.onText(/\/status/, (msg) => auth(msg, async () => this.#cmdStatus()));
     this.#bot.onText(/\/positions/, (msg) => auth(msg, () => this.#cmdPositions()));
     this.#bot.onText(/\/balance/, (msg) => auth(msg, () => this.#cmdBalance()));
-    this.#bot.onText(/\/trades/, (msg) => auth(msg, () => this.#cmdTrades()));
+    this.#bot.onText(/\/trades/, (msg) => auth(msg, async () => this.#cmdTrades()));
     this.#bot.onText(/\/stats/, (msg) => auth(msg, () => this.#cmdStats()));
     this.#bot.onText(/\/config/, (msg) => auth(msg, () => this.#cmdConfig()));
     this.#bot.onText(/\/risk/, (msg) => auth(msg, () => this.#cmdRisk()));
@@ -170,14 +170,25 @@ export class TelegramService {
     this.#send('💰 <b>BALANCE</b>\n\nBalance: $'+p.balance.toFixed(2)+'\nEquity: $'+p.equity.toFixed(2)+'\nRealized: $'+p.realized_pnl.toFixed(2)+'\nPeak: $'+(p.peak_balance||p.balance).toFixed(2));
   }
 
-  #cmdTrades() {
+  async #cmdTrades() {
     const t=this.#posRepo.findAll(10);
     if(!t||!t.length){this.#send('No trades');return;}
     let m='📋 <b>TRADE HISTORY</b>\n\n';
     let wins=0, losses=0, totalPnl=0;
-    t.forEach(x=>{
-      const emoji=x.status==='open'?'🟢':(x.pnl>0?'💰':'💸');
-      const sign=x.pnl>=0?'+':'';
+    let prices={};
+    try { prices=await this.#fetchPrices(); } catch{}
+    for(const x of t){
+      const isopen=x.status==='open';
+      let displayPnl=x.pnl||0;
+      let displayRoi=x.roi||0;
+      if(isopen && prices[x.pair]){
+        const cp=prices[x.pair];
+        const qty=x.remaining_quantity||x.quantity;
+        displayPnl=x.side==='long'?(cp-x.entry_price)*qty:(x.entry_price-cp)*qty;
+        displayRoi=x.entry_price>0?(displayPnl/(x.entry_price*qty))*100:0;
+      }
+      const emoji=isopen?'🟢':(displayPnl>0?'💰':'💸');
+      const sign=displayPnl>=0?'+':'';
       const hold=x.hold_duration?Math.floor(x.hold_duration/3600000)+'h '+Math.floor((x.hold_duration%3600000)/60000)+'m':'N/A';
       const reason=x.exit_reason||'open';
       m+=emoji+' <b>'+x.id+'</b>\n';
@@ -185,12 +196,12 @@ export class TelegramService {
       m+='   Entry: $'+(x.entry_price||0).toFixed(2);
       if(x.exit_price) m+=' → $'+x.exit_price.toFixed(2);
       m+='\n';
-      m+='   PnL: '+sign+'$'+(x.pnl||0).toFixed(2);
-      if(x.roi) m+=' ('+sign+x.roi.toFixed(2)+'%)';
+      m+='   PnL: '+sign+'$'+displayPnl.toFixed(2);
+      if(displayRoi) m+=' ('+sign+displayRoi.toFixed(2)+'%)';
       m+='\n';
       m+='   '+reason+' | '+hold+'\n\n';
-      if(x.status!=='open'){totalPnl+=(x.pnl||0);if(x.pnl>0)wins++;else losses++;}
-    });
+      if(!isopen){totalPnl+=(x.pnl||0);if(x.pnl>0)wins++;else losses++;}
+    }
     m+='─────────────────────\n';
     m+='📊 <b>SUMMARY</b>\n';
     m+='Total: '+t.length+' | W: '+wins+' | L: '+losses+'\n';
