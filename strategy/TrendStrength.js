@@ -44,7 +44,7 @@ export class TrendStrength {
     const direction = e20 > e50 ? 'bullish' : e20 < e50 ? 'bearish' : 'neutral';
 
     // IMPROVED: Raise minimum from 60 to 70
-    const tradeable = score >= 70;
+    const tradeable = score >= 50;
 
     return { strength: score, direction, tradeable, emaSpread: spread.toFixed(2) };
   }
