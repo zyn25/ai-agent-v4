@@ -189,7 +189,7 @@ export class TelegramService {
       }
       const emoji=isopen?'🟢':(displayPnl>0?'💰':'💸');
       const sign=displayPnl>=0?'+':'';
-      const hold=x.hold_duration?Math.floor(x.hold_duration/3600000)+'h '+Math.floor((x.hold_duration%3600000)/60000)+'m':'N/A';
+      const hold=x.hold_duration?Math.floor(x.hold_duration/3600000)+'h '+Math.floor((x.hold_duration%3600000)/60000)+'m':(x.open_time?Math.floor((Date.now()-new Date(x.open_time).getTime())/3600000)+'h '+Math.floor(((Date.now()-new Date(x.open_time).getTime())%3600000)/60000)+'m':'N/A');
       const reason=x.exit_reason||'open';
       m+=emoji+' <b>'+x.id+'</b>\n';
       m+='   '+x.pair+' | '+x.side.toUpperCase()+'\n';
