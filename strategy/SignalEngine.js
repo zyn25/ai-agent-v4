@@ -55,8 +55,7 @@ export class SignalEngine {
       const aligned = TrendFilter.checkAlignment(ps.trend, ss.trend, ts.trend);
 
       const rawThreshold = this.#strategyMode ? this.#strategyMode.getConfidenceThreshold() : this.#config.indicators.confidenceThreshold;
-      // Fix: Gunakan ?? alih-alih || agar angka 0 valid sebagai threshold
-      const threshold = Number(rawThreshold) ?? 45;
+      const threshold = isNaN(Number(rawThreshold)) ? 45 : Number(rawThreshold);
 
       this.#logger.trade('SIGNAL: ' + targetPair + ' | ' +
         primary + ':' + ps.trend + '(' + ps.score.toFixed(1) + ') | ' +

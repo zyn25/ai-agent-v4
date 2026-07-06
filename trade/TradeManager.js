@@ -12,11 +12,20 @@ import { EntryConfirmation } from '../strategy/EntryConfirmation.js';
 import { withRetry } from '../utils/retry.js';
 import { TRADING, TIMING } from '../utils/constants.js';
 import { EventEmitter } from 'events';
+import { DynamicLevels } from '../risk/DynamicLevels.js';
+import { FundingRateCheck } from '../strategy/FundingRateCheck.js';
+import { SmartCooldown } from './SmartCooldown.js';
+import { PairRotation } from '../strategy/PairRotation.js';
+import { PullbackFilter } from '../strategy/PullbackFilter.js';
+import { CandlePatterns } from '../strategy/CandlePatterns.js';
+import { StreakHandler } from '../risk/StreakHandler.js';
 
 export class TradeManager extends EventEmitter {
   #config; #logger; #db; #exchange; #signalEngine; #riskEngine; #aiValidator; #eventBus;
   #pm; #posRepo; #portRepo; #orderbook; #marketFilter; #marketStructure; #sessionFilter;
   #correlationChecker; #deduplicator; #strategyMode; #lifecycle; #entryConfirm;
+  #dynamicLevels; #fundingRate; #smartCooldown; #pairRotation; #pullbackFilter;
+  #candlePatterns; #streakHandler;
   #running = false; #loop = null; #reconnect = 0;
   #paused = false; #pauseReason = ''; #lastTradeTime = 0; #lastSessionBlock = '';
 
@@ -36,6 +45,13 @@ export class TradeManager extends EventEmitter {
     this.#deduplicator = new OrderDeduplicator(c);
     this.#lifecycle = new LifecycleLogger(db, l);
     this.#entryConfirm = new EntryConfirmation(l);
+    this.#dynamicLevels = new DynamicLevels(c, l);
+    this.#fundingRate = new FundingRateCheck(ex, l);
+    this.#smartCooldown = new SmartCooldown(c, l, db);
+    this.#pairRotation = new PairRotation(c, l, db);
+    this.#pullbackFilter = new PullbackFilter(l);
+    this.#candlePatterns = new CandlePatterns(l);
+    this.#streakHandler = new StreakHandler(db, l, c);
   }
 
   async initialize() {
@@ -123,7 +139,7 @@ export class TradeManager extends EventEmitter {
     }
     if (this.#lastSessionBlock) { this.#lastSessionBlock = ''; this.#eventBus.emit('session:resumed', { session: session.session }); }
 
-    const cooldownMs = (this.#strategyMode ? this.#strategyMode.getCooldownMinutes() : this.#config.risk.cooldownMinutes) * 60000;
+    const cooldownMs = this.#smartCooldown.getCooldown();
     if (Date.now() - this.#lastTradeTime < cooldownMs) return;
 
     const can = await this.#riskEngine.canTrade();
@@ -136,6 +152,9 @@ export class TradeManager extends EventEmitter {
   }
 
   async #scanPair(pair, now) {
+    // Pair rotation: skip underperforming pairs
+    if (this.#pairRotation.shouldSkip(pair)) return;
+
     const ohlcv = await withRetry(
       () => this.#exchange.fetchOHLCV(pair, this.#config.timeframes.primary, undefined, 200),
       { maxRetries: 2 }
@@ -156,19 +175,40 @@ export class TradeManager extends EventEmitter {
     const corr = this.#correlationChecker.check(pair, signal.side);
     if (!corr.allowed) { this.#logger.trade('[' + now + '] ' + pair + ' CORRELATION: ' + corr.reason); return; }
 
-    // FIX: Entry confirmation check
+    // Funding rate check
+    const funding = await this.#fundingRate.check(pair, signal.side);
+    if (!funding.allowed) { this.#logger.trade('[' + now + '] ' + pair + ' FUNDING: ' + funding.reason); return; }
+    if (funding.caution) { signal.confidence = Math.max(signal.confidence - 5, 0); }
+
+    // Session score modulation
+    const sessionScore = this.#sessionFilter.getSessionScore ? this.#sessionFilter.getSessionScore() : 100;
+    if (sessionScore < 50) { signal.confidence = Math.round(signal.confidence * 0.85); }
+
+    // Pullback filter
     const closes = ohlcv.map(c => c[4]);
     const opens = ohlcv.map(c => c[1]);
+    const highs = ohlcv.map(c => c[2]);
+    const lows = ohlcv.map(c => c[3]);
+    const price = closes[closes.length - 1];
+
+    const pullback = this.#pullbackFilter.check(closes, highs, lows, signal.side);
+    if (!pullback.valid) { this.#logger.trade('[' + now + '] ' + pair + ' PULLBACK: ' + pullback.reason); return; }
+
+    // Candle pattern confirmation (bonus confidence)
+    const candleConfirm = this.#candlePatterns.confirm(signal.side, closes, highs, lows, opens);
+    if (candleConfirm.confirmed) {
+      signal.confidence = Math.min(signal.confidence + 5, 100);
+      this.#logger.trade('[' + now + '] ' + pair + ' CANDLE: ' + candleConfirm.pattern + ' (+5%)');
+    }
+
+    // Entry confirmation check
     const entryConfirm = this.#entryConfirm.check(closes, opens, signal.side);
     if (!entryConfirm.confirmed) {
       this.#logger.trade('[' + now + '] ' + pair + ' ENTRY REJECTED: ' + entryConfirm.reason);
       return;
     }
 
-    // FIX: Support/Resistance check
-    const highs = ohlcv.map(c => c[2]);
-    const lows = ohlcv.map(c => c[3]);
-    const price = closes[closes.length - 1];
+    // Support/Resistance check
     const srValid = this.#marketStructure.validateEntry(signal.side, price, highs, lows, closes);
     if (!srValid) {
       this.#logger.trade('[' + now + '] ' + pair + ' S/R BLOCKED');
@@ -187,19 +227,41 @@ export class TradeManager extends EventEmitter {
       this.#logger.trade('[' + now + '] ' + pair + ' AI APPROVED: ' + ai.confidence + '%');
     }
 
-    await this.#execute(signal, ai, obDecision);
+    await this.#execute(signal, ai, obDecision, ohlcv);
   }
 
-  async #execute(sig, ai, obDecision) {
+  async #execute(sig, ai, obDecision, ohlcv) {
     try {
       const tk = await withRetry(() => this.#exchange.fetchTicker(sig.pair));
       const entry = this.#validatePrice(tk.last);
       if (!entry) return;
 
+      // Streak handler: check if we should pause
+      const streakPause = this.#streakHandler.shouldPause();
+      if (streakPause.pause) { this.#logger.trade('STREAK PAUSE: ' + streakPause.reason); return; }
+
       const atr = sig.indicators?.primary?.indicators?.atr?.value || entry * 0.01;
-      const lv = this.#riskEngine.calculateLevels(entry, atr, sig.side);
+
+      // Dynamic levels: adaptive SL/TP based on volatility
+      const highs = ohlcv.map(c => c[2]);
+      const lows = ohlcv.map(c => c[3]);
+      const closes = ohlcv.map(c => c[4]);
+      const trendStrength = { strength: sig.confidence, grade: sig.confidence >= 70 ? 'A' : sig.confidence >= 50 ? 'B' : 'C' };
+      const dynLevels = this.#dynamicLevels.calculate(entry, sig.side, highs, lows, closes, trendStrength);
+
+      // Use dynamic levels if available, fallback to static
+      const lv = dynLevels.mode !== 'fallback'
+        ? { stopLoss: dynLevels.stopLoss, takeProfit: dynLevels.takeProfit, breakEven: dynLevels.breakEven }
+        : this.#riskEngine.calculateLevels(entry, atr, sig.side);
+
       const bal = this.#portRepo.getCurrent()?.balance || this.#config.trading.startingBalance;
-      const sz = this.#riskEngine.calculatePositionSize(bal, entry, lv.stopLoss);
+
+      // Kelly criterion sizing
+      const sz = this.#riskEngine.calculatePositionSizeWithKelly(bal, entry, lv.stopLoss);
+
+      // Streak adjustment
+      const streakAdj = this.#streakHandler.adjustSize(sz.quantity);
+      sz.quantity = streakAdj.size;
 
       if (obDecision === 'caution') { sz.quantity *= 0.5; sz.riskAmount *= 0.5; }
       if (sz.quantity <= 0 || sz.marginRequired > bal) return;
@@ -211,7 +273,8 @@ export class TradeManager extends EventEmitter {
         quantity: sz.quantity, leverage: sz.leverage,
         stop_loss: lv.stopLoss, take_profit: lv.takeProfit,
         status: 'open', ai_confidence: ai.confidence, ai_decision: ai.decision,
-        strategy_version: 'v4', open_time: new Date().toISOString()
+        strategy_version: 'v4', open_time: new Date().toISOString(),
+        atr_at_entry: atr
       };
 
       this.#posRepo.create(pos);
@@ -219,8 +282,8 @@ export class TradeManager extends EventEmitter {
       this.#lastTradeTime = Date.now();
       this.#deduplicator.record(sig.pair, sig.side);
       this.#lifecycle.entry(pos.id, pos);
-      this.#eventBus.emit('trade:opened', { ...pos, riskAmount: sz.riskAmount, confidence: ai.confidence });
-      this.#logger.trade('OPENED: ' + pos.id + ' | ' + sig.pair + ' ' + sig.side + ' @ ' + entry);
+      this.#eventBus.emit('trade:opened', { ...pos, riskAmount: sz.riskAmount, confidence: ai.confidence, kellyStats: sz.kellyStats });
+      this.#logger.trade('OPENED: ' + pos.id + ' | ' + sig.pair + ' ' + sig.side + ' @ ' + entry + ' | Dynamic:' + dynLevels.mode);
     } catch (e) { this.#logger.error('Execute:', e.message); }
   }
 
@@ -294,7 +357,7 @@ export class TradeManager extends EventEmitter {
     }
 
     // Trailing Stop - only after 0.5R profit
-    const atr = Math.abs(pos.entry_price - pos.stop_loss) / this.#config.indicators.atrSlMultiplier;
+    const atr = pos.atr_at_entry || Math.abs(pos.entry_price - pos.stop_loss) / this.#config.indicators.atrSlMultiplier || pos.entry_price * 0.01;
     const profitDistance = pos.side === 'long' ? price - pos.entry_price : pos.entry_price - price;
     const profitInR = atr > 0 ? profitDistance / atr : 0;
 

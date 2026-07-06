@@ -4,7 +4,7 @@ export class EntryConfirmation {
 
   constructor(logger) { this.#logger = logger; }
 
-  check(closes, opens, side, minCandles = 3) {
+  check(closes, opens, side, minCandles = 2) {
     if (!Array.isArray(closes) || closes.length < this.#maxLookback) {
       return { confirmed: false, reason: 'Insufficient data', score: 0 };
     }

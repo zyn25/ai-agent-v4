@@ -43,7 +43,7 @@ export class Config {
       cooldownMinutes: parseInt(process.env.COOLDOWN_MINUTES, 10) || 30, 
       maxHoldHours: parseInt(process.env.MAX_HOLD_HOURS, 10) || 24, 
       breakEvenTrigger: parseFloat(process.env.BREAK_EVEN_TRIGGER) || 1.0, 
-      trailingStopATR: parseFloat(process.env.TRAILING_STOP_ATR) || 2.0, 
+      trailingStopATR: parseFloat(process.env.TRAILING_STOP_ATR) || 1.5, 
       // FIX: Tambahkan batas maksimal ukuran posisi (anti likuidasi)
       maxPositionValuePercent: parseFloat(process.env.MAX_POSITION_VALUE_PERCENT) || 25,
       partialTpLevels: (process.env.PARTIAL_TP_LEVELS || '1.5,2.5,4.0').split(',').map(Number), 
