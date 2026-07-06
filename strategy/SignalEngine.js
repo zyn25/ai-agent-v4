@@ -72,6 +72,12 @@ export class SignalEngine {
       }
 
       const side = mtf > 0 ? SIDE.LONG : SIDE.SHORT;
+
+      // EMA200 bias filter: block trades against long-term trend
+      if (trend.ema200Bias && side !== trend.ema200Bias) {
+        return { pair: targetPair, side: 'neutral', confidence: 0, reason: 'Against EMA200 trend (' + trend.ema200Bias + ')' };
+      }
+
       const confidence = Math.min(Math.abs(mtf), 100);
 
       if (confidence <= threshold) {

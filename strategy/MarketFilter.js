@@ -90,7 +90,18 @@ export class MarketFilter {
     const currentATR = atr[atr.length - 1];
     const avgATR = atr.reduce((s, v) => s + v, 0) / atr.length;
     const ratio = currentATR / avgATR;
+    const price = closes[closes.length - 1];
+    const atrPct = (currentATR / price) * 100;
+
+    // Block extreme volatility
     if (ratio > 5.0) return { pass: false, reason: 'Extreme volatility', score: 0 };
+
+    // Block very low volatility (ATR < 0.15% of price) - too tight for SL
+    if (atrPct < 0.15) return { pass: false, reason: 'ATR too low (' + atrPct.toFixed(3) + '%)', score: 0 };
+
+    // Block high volatility (ATR > 3x average)
+    if (ratio > 3.0) return { pass: false, reason: 'High volatility (' + ratio.toFixed(1) + 'x avg)', score: 0 };
+
     return { pass: true, reason: 'Volatility OK', score: 50 };
   }
 }

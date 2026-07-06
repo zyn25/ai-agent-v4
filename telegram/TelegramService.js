@@ -311,7 +311,7 @@ export class TelegramService {
 
   #cmdMode() {
     try {
-      const modes={aggressive:{name:'Aggressive',conf:30,risk:1.5,cd:15},balanced:{name:'Balanced',conf:45,risk:1.0,cd:30},conservative:{name:'Conservative',conf:60,risk:0.5,cd:60},scalping:{name:'Scalping',conf:20,risk:0.5,cd:5}};
+      const modes={aggressive:{name:'Aggressive',conf:40,risk:1.0,cd:15},balanced:{name:'Balanced',conf:55,risk:0.75,cd:30},conservative:{name:'Conservative',conf:70,risk:0.5,cd:60},scalping:{name:'Scalping',conf:35,risk:0.5,cd:5}};
       const current=this.#strategyModeName();
       let m='🎯 <b>STRATEGY MODE</b>\n\nCurrent: <b>'+current+'</b>\n\n';
       for(const[n,mode] of Object.entries(modes)){const a=n===current?' ✅':'';m+='<b>'+mode.name+'</b>'+a+'\n  Conf: '+mode.conf+'% | Risk: '+mode.risk+'% | CD: '+mode.cd+'min\n\n';}

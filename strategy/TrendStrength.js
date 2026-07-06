@@ -5,21 +5,23 @@ export class TrendStrength {
   constructor(config, logger) { this.#config = config; this.#logger = logger; }
 
   analyze(closes) {
-    if (!closes || closes.length < 100) {
+    if (!closes || closes.length < 200) {
       return { strength: 0, direction: 'unknown', tradeable: false };
     }
 
     const ema20 = EMAIndicator.calculate(closes, 20);
     const ema50 = EMAIndicator.calculate(closes, 50);
     const ema100 = EMAIndicator.calculate(closes, 100);
+    const ema200 = EMAIndicator.calculate(closes, 200);
 
-    if (!ema20.length || !ema50.length || !ema100.length) {
+    if (!ema20.length || !ema50.length || !ema100.length || !ema200.length) {
       return { strength: 0, direction: 'unknown', tradeable: false };
     }
 
     const e20 = ema20[ema20.length - 1];
     const e50 = ema50[ema50.length - 1];
     const e100 = ema100[ema100.length - 1];
+    const e200 = ema200[ema200.length - 1];
     const price = closes[closes.length - 1];
 
     let score = 0;
@@ -43,9 +45,12 @@ export class TrendStrength {
 
     const direction = e20 > e50 ? 'bullish' : e20 < e50 ? 'bearish' : 'neutral';
 
-    // IMPROVED: Raise minimum from 60 to 70
-    const tradeable = score >= 50;
+    // EMA200 trend bias: block long below EMA200, block short above EMA200
+    const ema200Bias = price > e200 ? 'bullish' : 'bearish';
 
-    return { strength: score, direction, tradeable, emaSpread: spread.toFixed(2) };
+    // IMPROVED: Raise minimum from 50 to 65
+    const tradeable = score >= 65;
+
+    return { strength: score, direction, tradeable, emaSpread: spread.toFixed(2), ema200Bias, priceVsEma200: ((price - e200) / e200 * 100).toFixed(2) };
   }
 }

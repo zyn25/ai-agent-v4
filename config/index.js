@@ -27,10 +27,10 @@ export class Config {
       macdSlow: parseInt(process.env.MACD_SLOW, 10) || 26, 
       macdSignal: parseInt(process.env.MACD_SIGNAL, 10) || 9, 
       atrPeriod: parseInt(process.env.ATR_PERIOD, 10) || 14, 
-      atrSlMultiplier: parseFloat(process.env.ATR_SL_MULTIPLIER) || 2, 
-      atrTpMultiplier: parseFloat(process.env.ATR_TP_MULTIPLIER) || 3, 
-      // FIX: Turunkan threshold dari 60 ke 45 agar sinyal bisa tembus
-      confidenceThreshold: parseInt(process.env.SIGNAL_CONFIDENCE_THRESHOLD, 10) || 45 
+      atrSlMultiplier: parseFloat(process.env.ATR_SL_MULTIPLIER) || 2.5, 
+      atrTpMultiplier: parseFloat(process.env.ATR_TP_MULTIPLIER) || 3.5, 
+      // FIX: Raise threshold untuk filter sinyal lemah
+      confidenceThreshold: parseInt(process.env.SIGNAL_CONFIDENCE_THRESHOLD, 10) || 55 
     };
     
     this.#risk = { 
@@ -38,7 +38,7 @@ export class Config {
       maxDailyLoss: parseFloat(process.env.MAX_DAILY_LOSS) || 3, 
       maxWeeklyLoss: parseFloat(process.env.MAX_WEEKLY_LOSS) || 7, 
       maxDrawdown: parseFloat(process.env.MAX_DRAWDOWN) || 15, 
-      maxConsecutiveLosses: parseInt(process.env.MAX_CONSECUTIVE_LOSSES, 10) || 5, 
+      maxConsecutiveLosses: parseInt(process.env.MAX_CONSECUTIVE_LOSSES, 10) || 3, 
       maxOpenPositions: parseInt(process.env.MAX_OPEN_POSITIONS, 10) || 3, 
       cooldownMinutes: parseInt(process.env.COOLDOWN_MINUTES, 10) || 30, 
       maxHoldHours: parseInt(process.env.MAX_HOLD_HOURS, 10) || 24, 
@@ -46,7 +46,7 @@ export class Config {
       trailingStopATR: parseFloat(process.env.TRAILING_STOP_ATR) || 1.5, 
       // FIX: Tambahkan batas maksimal ukuran posisi (anti likuidasi)
       maxPositionValuePercent: parseFloat(process.env.MAX_POSITION_VALUE_PERCENT) || 25,
-      partialTpLevels: (process.env.PARTIAL_TP_LEVELS || '1.5,2.5,4.0').split(',').map(Number), 
+      partialTpLevels: (process.env.PARTIAL_TP_LEVELS || '2.0,3.5,5.0').split(',').map(Number), 
       partialTpSizes: (process.env.PARTIAL_TP_SIZES || '30,30,40').split(',').map(Number) 
     };
     

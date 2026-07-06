@@ -5,10 +5,10 @@
 export class StrategyMode {
   #currentMode = 'balanced';
   #modes = {
-    aggressive: { name: 'Aggressive', confidenceThreshold: 30, maxOpenPositions: 5, riskPerTrade: 1.5, cooldownMinutes: 15 },
-    balanced: { name: 'Balanced', confidenceThreshold: 45, maxOpenPositions: 3, riskPerTrade: 1.0, cooldownMinutes: 30 },
-    conservative: { name: 'Conservative', confidenceThreshold: 60, maxOpenPositions: 2, riskPerTrade: 0.5, cooldownMinutes: 60 },
-    scalping: { name: 'Scalping', confidenceThreshold: 20, maxOpenPositions: 5, riskPerTrade: 0.5, cooldownMinutes: 5 }
+    aggressive: { name: 'Aggressive', confidenceThreshold: 40, maxOpenPositions: 5, riskPerTrade: 1.0, cooldownMinutes: 15 },
+    balanced: { name: 'Balanced', confidenceThreshold: 55, maxOpenPositions: 3, riskPerTrade: 0.75, cooldownMinutes: 30 },
+    conservative: { name: 'Conservative', confidenceThreshold: 70, maxOpenPositions: 2, riskPerTrade: 0.5, cooldownMinutes: 60 },
+    scalping: { name: 'Scalping', confidenceThreshold: 35, maxOpenPositions: 5, riskPerTrade: 0.5, cooldownMinutes: 5 }
   };
   #logger; #db; #loaded = false;
 
