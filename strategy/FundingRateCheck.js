@@ -21,11 +21,15 @@ export class FundingRateCheck {
   /**
    * Normalisasi pair ke format simbol exchange.
    * Handle: "BTC/USDT", "BTC/USDT:USDT", "BTCUSDT", "BTC/USDC"
+   * Untuk swap/futures, pertahankan suffix ":USDT" agar ccxt mengenali sebagai kontrak linear.
    */
   #normalizeSymbol(pair) {
     if (!pair || typeof pair !== 'string') return '';
 
-    // Hapus suffix ":USDT" / ":USDC" dll
+    // Kalau ada suffix ":USDT" atau ":USDC" (format futures swap), pertahankan
+    if (pair.includes(':')) return pair;
+
+    // Hapus suffix ":USDT" / ":USDC" dll untuk spot format
     let symbol = pair.replace(/:\w+$/, '');
 
     // Kalau sudah format "BASE/QUOTE", pertahankan
