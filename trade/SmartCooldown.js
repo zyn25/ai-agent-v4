@@ -34,7 +34,7 @@ export class SmartCooldown {
     // After big loss (> 2%): triple cooldown
     const lastTrade = recentTrades[0];
     const portfolio = this.#db.prepare('SELECT balance FROM portfolio ORDER BY id DESC LIMIT 1').get();
-    if (lastTrade && portfolio && lastTrade.pnl < 0) {
+    if (lastTrade && portfolio && portfolio.balance > 0 && lastTrade.pnl < 0) {
       const lossPct = Math.abs(lastTrade.pnl / portfolio.balance) * 100;
       if (lossPct > 2) {
         this.#logger.trade('Smart cooldown: big loss detected (' + lossPct.toFixed(1) + '%), triple cooldown');

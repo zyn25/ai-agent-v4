@@ -30,7 +30,7 @@ export class Config {
       atrSlMultiplier: parseFloat(process.env.ATR_SL_MULTIPLIER) || 2.5, 
       atrTpMultiplier: parseFloat(process.env.ATR_TP_MULTIPLIER) || 3.5, 
       // FIX: Raise threshold untuk filter sinyal lemah
-      confidenceThreshold: parseInt(process.env.SIGNAL_CONFIDENCE_THRESHOLD, 10) || 55 
+      confidenceThreshold: parseFloat(process.env.SIGNAL_CONFIDENCE_THRESHOLD) || 55 
     };
     
     this.#risk = { 

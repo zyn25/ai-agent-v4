@@ -60,6 +60,10 @@ class App {
       if (this.#logger) {
         this.#logger.error('Fatal startup error: ' + error.message);
       }
+      try {
+        const database = this.#container?.resolve('database');
+        if (database) await database.close();
+      } catch (e) { /* ignore close errors during startup failure */ }
       process.exit(1);
     }
   }

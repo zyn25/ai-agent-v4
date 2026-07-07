@@ -14,26 +14,21 @@ export class ReportService {
     this.#intervals.push(setInterval(() => {
       const n = new Date();
       const today = n.toDateString();
+      const dateStr = n.toISOString().substring(0, 10);
 
-      if (n.getHours() === 0 && n.getMinutes() === 0) {
-        if (this.#lastDaily !== today) {
-          this.#lastDaily = today;
-          this.#daily();
-        }
+      if (this.#lastDaily !== today && n.getHours() === 0) {
+        this.#lastDaily = today;
+        this.#daily();
       }
 
-      if (n.getDay() === 0 && n.getHours() === 0 && n.getMinutes() === 0) {
-        if (this.#lastWeekly !== today) {
-          this.#lastWeekly = today;
-          this.#weekly();
-        }
+      if (this.#lastWeekly !== today && n.getDay() === 0 && n.getHours() === 0) {
+        this.#lastWeekly = today;
+        this.#weekly();
       }
 
-      if (n.getDate() === 1 && n.getHours() === 0 && n.getMinutes() === 0) {
-        if (this.#lastMonthly !== today) {
-          this.#lastMonthly = today;
-          this.#monthly();
-        }
+      if (this.#lastMonthly !== today && n.getDate() === 1 && n.getHours() === 0) {
+        this.#lastMonthly = today;
+        this.#monthly();
       }
     }, 60000));
     this.#logger.info('Report service started (daily + weekly + monthly)');

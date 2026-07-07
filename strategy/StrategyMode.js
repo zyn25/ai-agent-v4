@@ -23,7 +23,7 @@ export class StrategyMode {
     try {
       const saved = this.#db.prepare("SELECT value FROM settings WHERE key='strategy_mode'").get();
       if (saved) {
-        const mode = JSON.parse(saved.value);
+        const mode = typeof saved.value === 'string' ? saved.value : JSON.parse(saved.value);
         if (this.#modes[mode]) {
           this.#currentMode = mode;
           this.#logger.info('Strategy mode loaded: ' + mode);
@@ -51,7 +51,7 @@ export class StrategyMode {
     try {
       this.#db.prepare(
         "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at"
-      ).run('strategy_mode', JSON.stringify(mode));
+      ).run('strategy_mode', mode);
       this.#logger.info('Strategy mode changed to: ' + mode);
     } catch (e) {
       this.#logger.error('Failed to save mode: ' + e.message);

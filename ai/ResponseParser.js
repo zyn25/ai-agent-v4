@@ -48,7 +48,7 @@ export class ResponseParser {
 
   #clamp(v, min, max) {
     const num = typeof v === 'number' ? v : parseFloat(v);
-    const safeNum = isNaN(num) ? 0 : Math.round(num);
+    const safeNum = isNaN(num) ? 0 : Math.floor(num);
     return Math.min(Math.max(safeNum, min), max);
   }
 

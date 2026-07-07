@@ -3,13 +3,10 @@ import { join } from 'path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { runMigrations } from './migrations/init.js';
 
-/**
- * SQLite database using sql.js.
- * FIX: Batch save instead of saving on every write.
- */
 export class Database {
   #config; #logger; #db = null; #dbPath;
   #dirty = false; #saveInterval = null;
+  #saveLock = false;
 
   constructor(config, logger) {
     this.#config = config;
@@ -32,7 +29,6 @@ export class Database {
     this.#db.run('PRAGMA foreign_keys = ON');
     runMigrations(this, this.#logger);
 
-    // FIX: Save every 10 seconds instead of every write
     this.#saveInterval = setInterval(() => {
       if (this.#dirty) {
         this.#saveNow();
@@ -74,7 +70,7 @@ export class Database {
           self.db.run(sql, p);
           self.#dirty = true;
           return { changes: self.db.getRowsModified() };
-        } catch (e) { self.#logger?.error('DB run error:', e.message); return { changes: 0 }; }
+        } catch (e) { self.#logger?.error('DB run error:', e.message); throw e; }
       },
     };
   }
@@ -84,12 +80,22 @@ export class Database {
     this.#dirty = true;
   }
 
+  saveSync() {
+    if (this.#saveLock) return;
+    this.#saveNow();
+    this.#dirty = false;
+  }
+
   #saveNow() {
+    if (this.#saveLock) return;
     try {
+      this.#saveLock = true;
       const d = this.db.export();
       writeFileSync(this.#dbPath, Buffer.from(d));
     } catch (e) {
       this.#logger?.error('DB save error:', e.message);
+    } finally {
+      this.#saveLock = false;
     }
   }
 

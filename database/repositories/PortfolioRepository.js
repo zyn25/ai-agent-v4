@@ -1,9 +1,5 @@
 import { BaseRepository } from './BaseRepository.js';
 
-/**
- * Portfolio repository.
- * FIX: Balance floor protection.
- */
 export class PortfolioRepository extends BaseRepository {
   constructor(db) { super(db, 'portfolio'); }
 
@@ -24,12 +20,10 @@ export class PortfolioRepository extends BaseRepository {
 
   updateBalance(pnl) {
     this.ensureExists(0);
-    const cur = this.getCurrent();
-    const newBal = cur.balance + pnl;
-    const peak = Math.max(cur.peak_balance || cur.balance, newBal);
+    const peakExpr = `MAX(peak_balance, balance + ${pnl >= 0 ? pnl : 0})`;
     this.db.prepare(
-      "UPDATE portfolio SET balance=balance+?, realized_pnl=realized_pnl+?, daily_pnl=daily_pnl+?, weekly_pnl=weekly_pnl+?, monthly_pnl=monthly_pnl+?, total_trades=total_trades+1, winning_trades=winning_trades+CASE WHEN ?>0 THEN 1 ELSE 0 END, losing_trades=losing_trades+CASE WHEN ?<=0 THEN 1 ELSE 0 END, peak_balance=?, updated_at=datetime('now') WHERE id=(SELECT id FROM portfolio ORDER BY id DESC LIMIT 1)"
-    ).run(pnl, pnl, pnl, pnl, pnl, pnl, pnl, peak);
+      "UPDATE portfolio SET balance=balance+?, realized_pnl=realized_pnl+?, daily_pnl=daily_pnl+?, weekly_pnl=weekly_pnl+?, monthly_pnl=monthly_pnl+?, total_trades=total_trades+1, winning_trades=winning_trades+CASE WHEN ?>0 THEN 1 ELSE 0 END, losing_trades=losing_trades+CASE WHEN ?<=0 THEN 1 ELSE 0 END, peak_balance=" + peakExpr + ", updated_at=datetime('now') WHERE id=(SELECT id FROM portfolio ORDER BY id DESC LIMIT 1)"
+    ).run(pnl, pnl, pnl, pnl, pnl, pnl, pnl, peakExpr);
   }
 
   updateWinRate() {

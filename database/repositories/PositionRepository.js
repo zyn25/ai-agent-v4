@@ -11,6 +11,6 @@ export class PositionRepository extends BaseRepository {
   countOpen() { const r=this.db.prepare("SELECT COUNT(*) as c FROM positions WHERE status='open'").get(); return r?.c||0; }
   closePosition(id,price,pnl,roi,fees,slip,reason,hold) { return this.db.prepare("UPDATE positions SET exit_price=?,pnl=?,roi=?,fees=?,slippage=?,status='closed',exit_reason=?,close_time=datetime('now'),hold_duration=?,updated_at=datetime('now') WHERE id=?").run(price,pnl,roi,fees,slip,reason,hold,id); }
   partialClose(id,closeQty,closePnl,fees,slip,remainingQty,ptpIndex) {
-    this.db.prepare("UPDATE positions SET closed_quantity=closed_quantity+?,remaining_quantity=?,partial_tp_index=?,updated_at=datetime('now') WHERE id=?").run(closeQty,remainingQty,ptpIndex,id);
+    this.db.prepare("UPDATE positions SET closed_quantity=closed_quantity+?,remaining_quantity=?,partial_tp_index=?,pnl=pnl+?,fees=fees+?,slippage=slippage+?,updated_at=datetime('now') WHERE id=?").run(closeQty,remainingQty,ptpIndex,closePnl,fees,slip,id);
   }
 }

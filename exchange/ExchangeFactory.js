@@ -12,6 +12,7 @@ export class ExchangeFactory {
       secret: secret || undefined,
       enableRateLimit: true,
       timeout: 30000,
+      verbose: false,
       options: { defaultType: 'swap' }
     };
     if (password) opts.password = password;

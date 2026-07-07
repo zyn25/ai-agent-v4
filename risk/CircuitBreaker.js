@@ -81,11 +81,9 @@ export class CircuitBreaker {
     if (this.#lastResetDate !== today) {
       this.#lastResetDate = today;
       try {
-        // FIX: Reset daily PnL
-        this.#db.prepare("UPDATE portfolio SET daily_pnl = 0, updated_at = datetime('now')").run();
+        this.#db.prepare("UPDATE portfolio SET daily_pnl = 0, updated_at = datetime('now', 'utc')").run();
         this.#logger.info('Daily PnL reset');
 
-        // FIX: Auto resume if already paused yesterday
         if (this.#paused) {
           this.#paused = false;
           this.#reason = '';
@@ -93,7 +91,6 @@ export class CircuitBreaker {
           this.#logger.info('Circuit breaker RESUMED after daily reset');
         }
       } catch (e) {
-        // FIX: Jangan silent fail, catat errornya!
         this.#logger.error('Daily reset error:', e.message);
       }
     }
@@ -128,7 +125,7 @@ export class CircuitBreaker {
   #getConsecutiveLossesToday() {
     try {
       const trades = this.#db.prepare(
-        "SELECT pnl FROM positions WHERE status = 'closed' AND date(close_time) = date('now') ORDER BY close_time DESC LIMIT 20"
+        "SELECT pnl FROM positions WHERE status = 'closed' AND date(close_time, 'utc') = date('now', 'utc') ORDER BY close_time DESC LIMIT 20"
       ).all();
       let count = 0;
       for (const t of trades) {

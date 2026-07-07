@@ -3,7 +3,10 @@ import { ResponseParser } from './ResponseParser.js';
 
 export class AIValidator {
   #config; #logger; #promptBuilder; #responseParser;
-  #cache; #cacheTTL; #failCount; #maxFails;
+  #cache; #cacheTTL; #failCount; #maxFails; #cacheCleanupInterval;
+  #rateLimitQueue = []; #rateLimitProcessing = false;
+  static MAX_CACHE_SIZE = 1000;
+  static RATE_LIMIT_DELAY_MS = 2000;
 
   constructor(config, logger) {
     this.#config = config;
@@ -14,6 +17,18 @@ export class AIValidator {
     this.#cacheTTL = 300000; // 5 menit cache
     this.#failCount = 0;
     this.#maxFails = 3;
+    this.#cacheCleanupInterval = setInterval(() => this.#cleanupCache(), 60000);
+  }
+
+  #cleanupCache() {
+    const now = Date.now();
+    for (const [key, entry] of this.#cache.entries()) {
+      if (now > entry.expiry) this.#cache.delete(key);
+    }
+    while (this.#cache.size > AIValidator.MAX_CACHE_SIZE) {
+      const firstKey = this.#cache.keys().next().value;
+      this.#cache.delete(firstKey);
+    }
   }
 
   async validate(signal, strategyThreshold) {
@@ -47,6 +62,7 @@ export class AIValidator {
     }
 
     try {
+      await this.#rateLimitDelay();
       const prompt = this.#promptBuilder.build(signal);
       const startTime = Date.now();
       const response = await this.#callAPI(prompt);
@@ -67,14 +83,8 @@ export class AIValidator {
       this.#failCount++;
       this.#logger.error('AI failed (' + this.#failCount + '/' + this.#maxFails + '): ' + error.message);
 
-      // Jika gagal, reject
       if (this.#failCount >= this.#maxFails) {
-        return {
-          decision: 'reject',
-          confidence: signal.confidence,
-          reason: 'AI unavailable - REJECT for safety',
-          fallback: true,
-        };
+        return this.#indicatorOnly(signal, strategyThreshold);
       }
 
       return {
@@ -173,5 +183,17 @@ export class AIValidator {
 
   #setCache(key, data) {
     this.#cache.set(key, { data, expiry: Date.now() + this.#cacheTTL });
+  }
+
+  async #rateLimitDelay() {
+    await new Promise(r => setTimeout(r, AIValidator.RATE_LIMIT_DELAY_MS));
+  }
+
+  shutdown() {
+    if (this.#cacheCleanupInterval) {
+      clearInterval(this.#cacheCleanupInterval);
+      this.#cacheCleanupInterval = null;
+    }
+    this.#cache.clear();
   }
 }

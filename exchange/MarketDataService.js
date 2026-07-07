@@ -1,6 +1,19 @@
 export class MarketDataService {
-  #exchange; #config; #logger; #cache = new Map(); #cacheTTL = 30000;
-  constructor(exchange, config, logger) { this.#exchange = exchange; this.#config = config; this.#logger = logger; }
+  #exchange; #config; #logger; #cache = new Map(); #cacheTTL = 30000; #cleanupInterval;
+  static MAX_CACHE_SIZE = 500;
+
+  constructor(exchange, config, logger) { this.#exchange = exchange; this.#config = config; this.#logger = logger; this.#cleanupInterval = setInterval(() => this.#cleanupCache(), 60000); }
+
+  #cleanupCache() {
+    const now = Date.now();
+    for (const [key, entry] of this.#cache.entries()) {
+      if (now > entry.expiry) this.#cache.delete(key);
+    }
+    while (this.#cache.size > MarketDataService.MAX_CACHE_SIZE) {
+      const firstKey = this.#cache.keys().next().value;
+      this.#cache.delete(firstKey);
+    }
+  }
 
   async fetchOHLCV(pair, timeframe, limit = 200) {
     const k = pair + '_' + timeframe + '_' + limit;
@@ -36,4 +49,12 @@ export class MarketDataService {
   }
 
   clearCache() { this.#cache.clear(); }
+
+  shutdown() {
+    if (this.#cleanupInterval) {
+      clearInterval(this.#cleanupInterval);
+      this.#cleanupInterval = null;
+    }
+    this.#cache.clear();
+  }
 }

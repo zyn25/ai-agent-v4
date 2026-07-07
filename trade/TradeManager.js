@@ -26,7 +26,7 @@ export class TradeManager extends EventEmitter {
   #correlationChecker; #deduplicator; #strategyMode; #lifecycle; #entryConfirm;
   #dynamicLevels; #fundingRate; #smartCooldown; #pairRotation; #pullbackFilter;
   #candlePatterns; #streakHandler;
-  #running = false; #loop = null; #reconnect = 0;
+  #running = false; #loop = null; #reconnect = 0; #pairErrors = new Map();
   #paused = false; #pauseReason = ''; #lastTradeTime = 0; #lastSessionBlock = '';
 
   constructor(c, l, db, ex, se, re, av, eb, sm) {
@@ -34,7 +34,7 @@ export class TradeManager extends EventEmitter {
     this.#config = c; this.#logger = l; this.#db = db; this.#exchange = ex;
     this.#signalEngine = se; this.#riskEngine = re; this.#aiValidator = av; this.#eventBus = eb;
     this.#strategyMode = sm;
-    this.#pm = new PositionManager();
+    this.#pm = new PositionManager(db);
     this.#posRepo = new PositionRepository(db);
     this.#portRepo = new PortfolioRepository(db);
     this.#orderbook = new OrderbookAnalyzer(ex, l);
@@ -89,7 +89,7 @@ export class TradeManager extends EventEmitter {
         const dd = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
         this.#db.prepare('INSERT INTO equity_curve (balance, equity, drawdown, drawdown_pct, peak_balance, open_positions) VALUES (?, ?, ?, ?, ?, ?)').run(p.balance, equity, peak - equity, dd, peak, open.length);
         this.#db.prepare("DELETE FROM equity_curve WHERE created_at < datetime('now', '-7 days')").run();
-      } catch (e) {}
+      } catch (e) { this.#logger.error('Equity tracking:', e.message); }
     }, TIMING.EQUITY_TRACK_MS);
   }
 
@@ -100,13 +100,20 @@ export class TradeManager extends EventEmitter {
 
   async closeAll(reason) {
     const open = this.#pm.getAll();
-    for (const pos of open) {
-      try {
-        const tk = await withRetry(() => this.#exchange.fetchTicker(pos.pair));
-        const price = this.#validatePrice(tk.last);
-        if (!price) continue;
-        await this.#close(pos, price, 'emergency_' + reason, this.#calcPnl(pos, price));
-      } catch (e) { this.#logger.error('Close error ' + pos.id); }
+    this.#db.exec('BEGIN TRANSACTION');
+    try {
+      for (const pos of open) {
+        try {
+          const tk = await withRetry(() => this.#exchange.fetchTicker(pos.pair));
+          const price = this.#validatePrice(tk.last);
+          if (!price) { this.#logger.error('Invalid ticker for ' + pos.pair + ' during closeAll'); continue; }
+          await this.#close(pos, price, 'emergency_' + reason, this.#calcPnl(pos, price));
+        } catch (e) { this.#logger.error('Close error ' + pos.id); }
+      }
+      this.#db.exec('COMMIT');
+    } catch (e) {
+      this.#db.exec('ROLLBACK');
+      this.#logger.error('CloseAll transaction failed:', e.message);
     }
     this.pause('Emergency: ' + reason);
   }
@@ -125,8 +132,8 @@ export class TradeManager extends EventEmitter {
 
   async #tick() {
     const now = this.#ts();
-    try { await this.#monitor(); this.#reconnect = 0; }
-    catch (e) { this.#reconnect++; if (this.#reconnect >= 5) { await this.#sleep(300000); this.#reconnect = 0; } return; }
+    try { await this.#monitor(); }
+    catch (e) { this.#logger.error('Monitor:', e.message); }
 
     const session = this.#sessionFilter.check();
     if (!session.trade) {
@@ -234,7 +241,7 @@ export class TradeManager extends EventEmitter {
     try {
       const tk = await withRetry(() => this.#exchange.fetchTicker(sig.pair));
       const entry = this.#validatePrice(tk.last);
-      if (!entry) return;
+      if (!entry) { this.#logger.trade('Invalid ticker for ' + sig.pair); return; }
 
       // Streak handler: check if we should pause
       const streakPause = this.#streakHandler.shouldPause();
@@ -290,13 +297,25 @@ export class TradeManager extends EventEmitter {
   async #monitor() {
     const t = this.#pm.getAll();
     if (!t.length) return;
+    let globalErrors = 0;
     for (const pos of t) {
       try {
         const tk = await withRetry(() => this.#exchange.fetchTicker(pos.pair), { maxRetries: 2 });
         const price = this.#validatePrice(tk.last);
-        if (!price) continue;
+        if (!price) { this.#logger.trade('Invalid ticker for ' + pos.pair); continue; }
         await this.#check(pos, price);
-      } catch (e) { this.#logger.error('Check ' + pos.id + ':', e.message); }
+      } catch (e) {
+        globalErrors++;
+        const pe = this.#pairErrors.get(pos.pair) || 0;
+        this.#pairErrors.set(pos.pair, pe + 1);
+        this.#logger.error('Check ' + pos.id + ':', e.message);
+      }
+    }
+    if (globalErrors >= t.length && globalErrors >= 3) {
+      this.#reconnect++;
+      if (this.#reconnect >= 5) { await this.#sleep(300000); this.#reconnect = 0; }
+    } else {
+      this.#reconnect = 0;
     }
   }
 
@@ -318,7 +337,7 @@ export class TradeManager extends EventEmitter {
     const ptpIndex = pos.partial_tp_index || 0;
     const ptp = this.#riskEngine.shouldPartialTP(price, pos.entry_price, pos.side, ptpIndex);
     if (ptp) {
-      const closeQty = qty * (ptp.sizePercent / 100);
+      const closeQty = Math.min(qty * (ptp.sizePercent / 100), qty);
       if (closeQty > 0.0001) {
         const closePnl = this.#calcPnlForQty(pos, price, closeQty);
         const fees = closeQty * price * TRADING.FEE_RATE;
@@ -363,13 +382,15 @@ export class TradeManager extends EventEmitter {
 
     if (profitInR >= 0.5) {
       const ts = this.#riskEngine.getTrailingStop(price, atr, pos.side);
-      if (pos.trailing_stop) {
-        if ((pos.side === 'long' && price <= pos.trailing_stop) || (pos.side === 'short' && price >= pos.trailing_stop)) {
+      const currentPos = this.#pm.get(pos.id);
+      if (!currentPos) return;
+      if (currentPos.trailing_stop) {
+        if ((pos.side === 'long' && price <= currentPos.trailing_stop) || (pos.side === 'short' && price >= currentPos.trailing_stop)) {
           this.#lifecycle.trailingStop(pos.id, price);
           await this.#close(pos, price, 'trailing_stop', pnl); return;
         }
       }
-      if (ts && (!pos.trailing_stop || (pos.side === 'long' && ts > pos.trailing_stop) || (pos.side === 'short' && ts < pos.trailing_stop))) {
+      if (ts && (!currentPos.trailing_stop || (pos.side === 'long' && ts > currentPos.trailing_stop) || (pos.side === 'short' && ts < currentPos.trailing_stop))) {
         this.#pm.update(pos.id, { trailing_stop: ts });
         this.#posRepo.update(pos.id, { trailing_stop: ts });
       }
@@ -381,7 +402,7 @@ export class TradeManager extends EventEmitter {
     const fees = price * qty * TRADING.FEE_RATE;
     const slip = price * qty * TRADING.SLIPPAGE_RATE;
     const net = pnl - fees - slip;
-    const roi = pos.entry_price > 0 && qty > 0 ? (net / (pos.entry_price * qty)) * 100 : 0;
+    const roi = pos.entry_price > 0 && qty > 0 ? ((net / (pos.entry_price * qty)) * 100 * (pos.leverage || 1)) : 0;
     const hold = Date.now() - new Date(pos.open_time).getTime();
 
     this.#posRepo.closePosition(pos.id, price, net, roi, fees, slip, reason, hold);

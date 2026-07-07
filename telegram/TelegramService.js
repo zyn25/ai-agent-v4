@@ -336,14 +336,14 @@ export class TelegramService {
     try {
       if (this.#strategyMode) this.#strategyMode.setMode(mode);
       else {
-        this.#db.prepare("INSERT INTO settings (key,value,updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").run('strategy_mode',JSON.stringify(mode));
+        this.#db.prepare("INSERT INTO settings (key,value,updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at").run('strategy_mode', mode);
       }
       this.#send('✅ Mode changed to: <b>'+mode+'</b>');
     } catch(e){this.#send('Error: '+e.message);}
   }
 
   #strategyModeName() {
-    try { const s=this.#db.prepare("SELECT value FROM settings WHERE key='strategy_mode'").get(); if(s) return JSON.parse(s.value); } catch{}
+    try { const s=this.#db.prepare("SELECT value FROM settings WHERE key='strategy_mode'").get(); if(s) return typeof s.value === 'string' ? s.value : JSON.parse(s.value); } catch{}
     return 'balanced';
   }
 
@@ -351,4 +351,18 @@ export class TelegramService {
   async sendReport(m){await this.#send(m);}
   #ts(){return new Date().toISOString().replace('T',' ').substring(0,19);}
   async #send(t){if(!this.#bot||!this.#chatId)return;try{await this.#bot.sendMessage(this.#chatId,t,{parse_mode:'HTML'});}catch(e){this.#logger.error('TG send:',e.message);}}
+  async shutdown() {
+    if (this.#bot) {
+      this.#eventBus.removeAllListeners('trade:opened');
+      this.#eventBus.removeAllListeners('trade:closed');
+      this.#eventBus.removeAllListeners('trade:partial_close');
+      this.#eventBus.removeAllListeners('trade:paused');
+      this.#eventBus.removeAllListeners('trade:resumed');
+      this.#eventBus.removeAllListeners('ai:validated');
+      this.#eventBus.removeAllListeners('session:blocked');
+      this.#eventBus.removeAllListeners('session:resumed');
+      try { this.#bot.stopPolling(); } catch {}
+      this.#bot = null;
+    }
+  }
 }
