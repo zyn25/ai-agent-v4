@@ -146,6 +146,9 @@ export class TradeManager extends EventEmitter {
     }
     if (this.#lastSessionBlock) { this.#lastSessionBlock = ''; this.#eventBus.emit('session:resumed', { session: session.session }); }
 
+    const modeName = this.#strategyMode ? this.#strategyMode.getModeName() : 'default';
+    this.#logger.trade('[' + now + '] Scanning ' + this.#config.pairs.length + ' pairs | Session: ' + (session.session || 'unknown') + ' | Mode: ' + modeName);
+
     const cooldownMs = this.#smartCooldown.getCooldown();
     if (Date.now() - this.#lastTradeTime < cooldownMs) return;
 
